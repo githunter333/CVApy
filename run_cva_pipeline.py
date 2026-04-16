@@ -69,16 +69,16 @@ from cva_mode_shapes import CVAModeShapes
 # USER SETTINGS
 # =============================================================================
 
-DATA_FILE = '/Users/nhunterjr/Documents/Code/shared/Nonlinear Data/Experimental_Data/r6dof/cva_formatted/r6dofcubic2ss_cva.txt'
+DATA_FILE = '/Users/nhunterjr/Documents/Code/matlab/CVA/experiments/formatted input data/dumbbell/dumbbellringdown.txt'
 # Save settings
 RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 SAVE_PLOTS   = True
 PLOT_DPI     = 150
 
 # CVA parameters
-LAGS        = 32
-TOL         = 5e-4
-NEIGHBORS   = 800
+LAGS        = 64
+TOL         = 1e-4
+NEIGHBORS   = 100
 RANKLOCK    = 0
 EVAL_STRIDE = 1
 FS          = 2048.0
@@ -89,9 +89,13 @@ N_PCA_VAR    = 95.0
 KMEANS_REP   = 20
 N_CLUSTERS   = 0
 
+# Frequency band filter — applied to both clustering and mode shapes
+# Set F_MIN / F_MAX to None to disable (uses default 0.5 Hz lower bound only)
+F_MIN        = 40  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
+F_MAX        = 500 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
+
 # Mode shapes
 MIN_IM_FRAC  = 0.05
-F_MIN        = 0.5
 ZETA_MAX     = 0.5
 N_MODES_MAX  = 12
 
@@ -168,7 +172,8 @@ if PLOT_RECONSTRUCTION:
 if RUN_CLUSTER:
     print('\n--- Step 2: Phi Clustering ---')
     clust = CVAPhiCluster(run, k_max=K_MAX,
-                          n_pca_var=N_PCA_VAR, kmeans_rep=KMEANS_REP)
+                          n_pca_var=N_PCA_VAR, kmeans_rep=KMEANS_REP,
+                          f_min=F_MIN, f_max=F_MAX)
     clust.fit(n_clusters=N_CLUSTERS)
     clust.save(str(h5_clust))
     print(f'  Saved: {h5_clust}')
