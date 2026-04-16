@@ -45,6 +45,7 @@ DATA_DIR   = Path('/Users/nhunterjr/Documents/Code/shared/Nonlinear Data/Experim
 BASE_NAMES = [
      'r6dofblinin80pct2'
      'r6dofcubic2s',
+     'r6dofdeadzone2'
 
 ]
 
