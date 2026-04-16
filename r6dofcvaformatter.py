@@ -43,9 +43,9 @@ DATA_DIR   = Path('/Users/nhunterjr/Documents/Code/shared/Nonlinear Data/Experim
 
 # List of base names to format — script appends 'in.dat' and 'out.dat'
 BASE_NAMES = [
-    'r6dofcubic2',
-    'r6dofblin10pct2',    # add more as needed
-    'r6doflin',
+     'r6dofblinin80pct2'
+     'r6dofcubic2s',
+
 ]
 
 FS           = 2048.0   # sample rate Hz
