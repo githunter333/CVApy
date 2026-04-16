@@ -20,7 +20,7 @@ from sklearn.decomposition import PCA
 from cva_run import CVARun
 
 
-def _get_physical(mean_ev, dt, fs, min_im_frac=0.01):
+def _get_physical(mean_ev, dt, fs, min_im_frac=0.01, f_min=None, f_max=None):
     ce      = np.log(mean_ev + 1e-300) / dt
     omega_d = np.abs(np.imag(ce))
     sigma   = -np.real(ce)
@@ -30,18 +30,25 @@ def _get_physical(mean_ev, dt, fs, min_im_frac=0.01):
     mag     = np.abs(mean_ev)
     good = ((np.abs(np.imag(mean_ev)) > min_im_frac * mag) &
             (freq > 0.5) & (freq < fs/2) & (mag <= 1.0) & (np.imag(mean_ev) > 0))
+    if f_min is not None:
+        good &= (freq >= f_min)
+    if f_max is not None:
+        good &= (freq <= f_max)
     return freq[good], zeta[good], mag[good]
 
 
 class CVAPhiCluster:
     def __init__(self, run, k_max=8, n_pca_var=95.0,
-                 kmeans_rep=20, kmeans_iter=500, min_im_frac=0.01):
+                 kmeans_rep=20, kmeans_iter=500, min_im_frac=0.01,
+                 f_min=None, f_max=None):
         self.run         = run
         self.k_max       = k_max
         self.n_pca_var   = n_pca_var
         self.kmeans_rep  = kmeans_rep
         self.kmeans_iter = kmeans_iter
         self.min_im_frac = min_im_frac
+        self.f_min       = f_min   # Optional lower frequency bound (Hz)
+        self.f_max       = f_max   # Optional upper frequency bound (Hz)
 
         self.rk_mode:       int   = 0
         self.use_idx:       np.ndarray = np.array([], dtype=int)
@@ -199,6 +206,10 @@ class CVAPhiCluster:
             zeta = -np.real(ce) / (np.sqrt(np.imag(ce)**2+np.real(ce)**2)+1e-12)
             good = ((np.abs(np.imag(mean_ev)) > self.min_im_frac*mag) &
                     (freq > 0.5) & (freq < fs/2) & (mag <= 1.0) & (np.imag(mean_ev) > 0))
+            if self.f_min is not None:
+                good &= (freq >= self.f_min)
+            if self.f_max is not None:
+                good &= (freq <= self.f_max)
             tag = ' [minority]' if k in self.minority else ''
             print(f'\n  Cluster {k}{tag}  ({n_win} windows):')
             for ei in np.where(good)[0]:
@@ -206,8 +217,10 @@ class CVAPhiCluster:
 
     def _frequency_shift_report(self):
         dt = 1.0/self.run.fs; fs = self.run.fs
-        fA,zA,mA = _get_physical(self.cluster_mean_ev[self.regime_A], dt, fs, self.min_im_frac)
-        fB,zB,mB = _get_physical(self.cluster_mean_ev[self.regime_B], dt, fs, self.min_im_frac)
+        fA,zA,mA = _get_physical(self.cluster_mean_ev[self.regime_A], dt, fs,
+                                  self.min_im_frac, self.f_min, self.f_max)
+        fB,zB,mB = _get_physical(self.cluster_mean_ev[self.regime_B], dt, fs,
+                                  self.min_im_frac, self.f_min, self.f_max)
         fA,fB = fA[np.argsort(fA)], fB[np.argsort(fB)]
         zA,zB = zA[np.argsort(fA)], zB[np.argsort(fB)]
         mA,mB = mA[np.argsort(fA)], mB[np.argsort(fB)]
@@ -300,6 +313,10 @@ class CVAPhiCluster:
             freq    = np.abs(np.imag(ce)) / (2*np.pi)
             good    = ((np.abs(np.imag(mean_ev)) > self.min_im_frac*mag) &
                        (freq > 0.5) & (freq < fs/2) & (mag <= 1.0) & (np.imag(mean_ev) > 0))
+            if self.f_min is not None:
+                good &= (freq >= self.f_min)
+            if self.f_max is not None:
+                good &= (freq <= self.f_max)
             is_min  = ci in self.minority
             ax.scatter(np.real(mean_ev[good]), np.imag(mean_ev[good]),
                        s=80 if not is_min else 60, color=cmap[ci],
