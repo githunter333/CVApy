@@ -61,7 +61,13 @@ CVAPY_DIR = Path('/Users/nhunterjr/Documents/Code/python/CVApy')
 if str(CVAPY_DIR) not in sys.path:
     sys.path.insert(0, str(CVAPY_DIR))
 
-from cva_run         import CVAConfig, CVARun
+import importlib
+import cva_core, cva_run, cva_phi_cluster, cva_mode_shapes
+importlib.reload(cva_core)
+importlib.reload(cva_run)
+importlib.reload(cva_phi_cluster)
+importlib.reload(cva_mode_shapes)
+from cva_run import CVAConfig, CVARun
 from cva_phi_cluster import CVAPhiCluster
 from cva_mode_shapes import CVAModeShapes
 
@@ -76,7 +82,7 @@ SAVE_PLOTS   = True
 PLOT_DPI     = 150
 
 # CVA parameters
-LAGS        = 60
+LAGS        = 20
 TOL         = 1e-4
 NEIGHBORS   = 200
 RANKLOCK    = 0
@@ -109,6 +115,7 @@ PLOT_SIGNIFICANCE   = True
 PLOT_RECONSTRUCTION = True
 PLOT_CLUSTERS       = True
 PLOT_MODES          = True
+PLOT_FREQ_DEVIATION = True
 
 # =============================================================================
 # DIRECTORY SETUP
@@ -160,6 +167,12 @@ print(run)
 if PLOT_SIGNIFICANCE:
     run.plot_significance(save_path=figpath('significance'), dpi=PLOT_DPI)
 
+if PLOT_FREQ_DEVIATION:
+    run.plot_frequency_deviation(
+        band_half=20.0,
+        save_path=figpath('freq_deviation'),
+        dpi=PLOT_DPI)
+    
 if PLOT_RECONSTRUCTION:
     run.plot_reconstruction(channel=0,
                             save_path=figpath('reconstruction_ch1'),
