@@ -69,19 +69,19 @@ from cva_mode_shapes import CVAModeShapes
 # USER SETTINGS
 # =============================================================================
 
-DATA_FILE = '/Users/nhunterjr/Documents/Code/matlab/CVA/experiments/formatted input data/dumbbell/dumbbellringdown.txt'
+DATA_FILE = '/Users/nhunterjr/Documents/Code/matlab/CVA/experiments/formatted input data/dumbbell/dbringdec2.txt'
 # Save settings
 RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 SAVE_PLOTS   = True
 PLOT_DPI     = 150
 
 # CVA parameters
-LAGS        = 64
+LAGS        = 60
 TOL         = 1e-4
-NEIGHBORS   = 100
+NEIGHBORS   = 200
 RANKLOCK    = 0
 EVAL_STRIDE = 1
-FS          = 2048.0
+FS          = 5000.0
 
 # Clustering
 K_MAX        = 8
@@ -164,6 +164,14 @@ if PLOT_RECONSTRUCTION:
     run.plot_reconstruction(channel=0,
                             save_path=figpath('reconstruction_ch1'),
                             dpi=PLOT_DPI)
+
+# --- ADD THESE ---
+print('\n--- Prediction Errors ---')
+run.compute_one_step_error(stride=10)
+
+run.plot_iterated_prediction(channel=0, iter_K=20, iter_stride=100,
+                             save_path=figpath('iterated_prediction_ch1'),
+                             dpi=PLOT_DPI)
 
 # =============================================================================
 # STEP 2: PHI CLUSTERING
