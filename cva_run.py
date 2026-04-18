@@ -667,7 +667,7 @@ class CVARun:
     # ------------------------------------------------------------------
     # plot_frequency_deviation
     # ------------------------------------------------------------------
-    def plot_frequency_deviation(self, band_half=20.0, min_mag=0.999
+    def plot_frequency_deviation(self, band_half=20.0, min_mag=0.99
                                  ,
                                  save_path=None, dpi=150):
         """
