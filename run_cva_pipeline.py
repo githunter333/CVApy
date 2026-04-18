@@ -75,19 +75,19 @@ from cva_mode_shapes import CVAModeShapes
 # USER SETTINGS
 # =============================================================================
 
-DATA_FILE = '/Users/nhunterjr/Documents/Code/matlab/CVA/experiments/formatted input data/dumbbell/dbringdec2.txt'
+DATA_FILE = '/Users/nhunterjr/Documents/Code/shared/Nonlinear Data/Experimental_Data/Farrar 4DOF Nonlinear/Data/cva_inputs/state#13/s13d210_cva.txt'
 # Save settings
 RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 SAVE_PLOTS   = True
 PLOT_DPI     = 150
 
 # CVA parameters
-LAGS        = 20
+LAGS        = 40
 TOL         = 1e-4
-NEIGHBORS   = 200
+NEIGHBORS   = 800
 RANKLOCK    = 0
 EVAL_STRIDE = 1
-FS          = 5000.0
+FS          = 322.58
 
 # Clustering
 K_MAX        = 8
@@ -97,8 +97,8 @@ N_CLUSTERS   = 0
 
 # Frequency band filter — applied to both clustering and mode shapes
 # Set F_MIN / F_MAX to None to disable (uses default 0.5 Hz lower bound only)
-F_MIN        = 40  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
-F_MAX        = 500 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
+F_MIN        = 10  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
+F_MAX        = 100 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
 
 # Mode shapes
 MIN_IM_FRAC  = 0.05

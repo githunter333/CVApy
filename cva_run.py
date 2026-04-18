@@ -667,7 +667,8 @@ class CVARun:
     # ------------------------------------------------------------------
     # plot_frequency_deviation
     # ------------------------------------------------------------------
-    def plot_frequency_deviation(self, band_half=20.0, min_mag=None,
+    def plot_frequency_deviation(self, band_half=20.0, min_mag=0.999
+                                 ,
                                  save_path=None, dpi=150):
         """
         Plot frequency deviation from mean for each detected mode.
@@ -741,7 +742,7 @@ class CVARun:
     # plot_reconstruction
     # ------------------------------------------------------------------
     def plot_reconstruction(self, channel=0, bands=None,
-                            band_width=5.0, n_bands_max=8,
+                            band_width=15.0, n_bands_max=8,
                             save_path=None, dpi=150):
         if not self.windows:
             raise RuntimeError('Call run() first')
@@ -781,7 +782,11 @@ class CVARun:
                 target_idx = idx_j + lags
                 if target_idx >= len(self.time): continue
                 recon_times[j] = self.time[target_idx]
-                statenow = np.mean(wr.spast, axis=0)
+                aug_query = np.concatenate([
+                self.past_db[wr.window_idx, :],
+                self.inputd[wr.sample_idx, :]
+                ])
+                statenow = wr.Jnow @ aug_query
 
                 ev_j, V_j = np.linalg.eig(wr.Phi)
                 freq_j    = np.abs(np.angle(ev_j))*fs/(2*np.pi)
