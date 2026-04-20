@@ -41,13 +41,13 @@ from cva_core import cvaonestep, delaybuild, reset_cva_state
 class CVAConfig:
     lags:                   int   = 64
     tol:                    float = 5e-4
-    neighbors:              int   = 960
+    neighbors:              int   = 800
     ranklock:               int   = 0
     eval_stride:            int   = 1
     fs:                     Optional[float] = None
     freq_min:               float = 0.0
     freq_max:               float = 0.0
-    sig_threshold_fraction: float = 0.05
+    sig_threshold_fraction: float = 0.25
 
 
 # =============================================================================
@@ -92,7 +92,7 @@ class CVARun:
     # load_data
     # ------------------------------------------------------------------
     def load_data(self, filepath, col_time=0, col_force=1,
-                  col_accel_start=2):
+                  col_accel_start=2, n_in=1):
         p = Path(filepath)
         if not p.exists():
             raise FileNotFoundError(f'Not found: {p}')
@@ -100,7 +100,7 @@ class CVARun:
         print(f'Loading: {p}')
         raw = np.loadtxt(str(p))
         self.time   = raw[:, col_time]
-        self.inputd = raw[:, col_force:col_force+1]
+        self.inputd = raw[:, col_force:col_force+n_in]
         self.datout = raw[:, col_accel_start:]
         N = len(self.time)
         self.n_out = self.datout.shape[1]
