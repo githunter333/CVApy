@@ -593,7 +593,7 @@ class CVARun:
     # ------------------------------------------------------------------
     # plot_significance
     # ------------------------------------------------------------------
-    def plot_significance(self, save_path=None, dpi=150):
+    def plot_significance(self, save_path=None, dpi=150, z_threshold=None):
         if not self.sig:
             self.eigenvalue_significance()
         sig   = self.sig
@@ -636,7 +636,7 @@ class CVARun:
         ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
         ax = axes[1,0]
-        mag_thresh = np.median(sig['all_mag'])
+        mag_thresh = z_threshold if z_threshold is not None else np.median(sig["all_mag"])
         mask = sig['all_mag']>=mag_thresh
         sc2 = ax.scatter(sig['all_times'][mask], sig['all_freqs'][mask],
                          c=sig['all_mag'][mask], cmap='plasma',
