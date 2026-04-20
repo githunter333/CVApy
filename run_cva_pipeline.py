@@ -75,19 +75,19 @@ from cva_mode_shapes import CVAModeShapes
 # USER SETTINGS
 # =============================================================================
 
-DATA_FILE = '/Users/nhunterjr/Documents/Code/shared/Nonlinear Data/Experimental_Data/Farrar 4DOF Nonlinear/Data/cva_inputs/state#13/s13d210_cva.txt'
+DATA_FILE = '/Users/nhunterjr/Documents/Code/python/CVApy/bltimedata.txt'
 # Save settings
 RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 SAVE_PLOTS   = True
 PLOT_DPI     = 150
 
 # CVA parameters
-LAGS        = 40
+LAGS        = 50
 TOL         = 1e-4
 NEIGHBORS   = 800
 RANKLOCK    = 0
 EVAL_STRIDE = 1
-FS          = 322.58
+FS          = 3200
 
 # Clustering
 K_MAX        = 8
@@ -97,8 +97,8 @@ N_CLUSTERS   = 0
 
 # Frequency band filter — applied to both clustering and mode shapes
 # Set F_MIN / F_MAX to None to disable (uses default 0.5 Hz lower bound only)
-F_MIN        = 10  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
-F_MAX        = 100 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
+F_MIN        = 50  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
+F_MAX        = 800 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
 
 # Mode shapes
 MIN_IM_FRAC  = 0.05
@@ -152,7 +152,7 @@ if RUN_CVA:
     cfg = CVAConfig(lags=LAGS, tol=TOL, neighbors=NEIGHBORS,
                     ranklock=RANKLOCK, eval_stride=EVAL_STRIDE, fs=FS)
     run = CVARun(cfg)
-    run.load_data(DATA_FILE)
+    run.load_data(DATA_FILE, col_time=0, col_force=1, col_accel_start=7, n_in=6)
     run.build_database()
     run.run()
     run.eigenvalue_significance()
