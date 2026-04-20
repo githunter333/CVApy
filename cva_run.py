@@ -47,7 +47,7 @@ class CVAConfig:
     fs:                     Optional[float] = None
     freq_min:               float = 0.0
     freq_max:               float = 0.0
-    sig_threshold_fraction: float = 0.10
+    sig_threshold_fraction: float = 0.05
 
 
 # =============================================================================
@@ -593,7 +593,7 @@ class CVARun:
     # ------------------------------------------------------------------
     # plot_significance
     # ------------------------------------------------------------------
-    def plot_significance(self, save_path=None, dpi=150, z_threshold=None):
+    def plot_significance(self, save_path=None, dpi=150):
         if not self.sig:
             self.eigenvalue_significance()
         sig   = self.sig
@@ -636,7 +636,7 @@ class CVARun:
         ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
         ax = axes[1,0]
-        mag_thresh = z_threshold if z_threshold is not None else np.median(sig['all_mag'])
+        mag_thresh = np.median(sig['all_mag'])
         mask = sig['all_mag']>=mag_thresh
         sc2 = ax.scatter(sig['all_times'][mask], sig['all_freqs'][mask],
                          c=sig['all_mag'][mask], cmap='plasma',
@@ -667,72 +667,81 @@ class CVARun:
     # ------------------------------------------------------------------
     # plot_frequency_deviation
     # ------------------------------------------------------------------
-    def plot_frequency_deviation(self, band_half=20.0, min_mag=0.99
-                                 ,
+    def plot_frequency_deviation(self, band_half=20.0, min_mag=0.99,
+                                 ma_window=20,
                                  save_path=None, dpi=150):
         """
-        Plot frequency deviation from mean for each detected mode.
-    
-        For each peak frequency in sig['peak_freqs'], isolates eigenvalues
-        within +/- band_half Hz, subtracts the band mean, and plots the
-        residual vs time coloured by |z|.
-    
-        Reveals:
-          - Amplitude-dependent softening (gradual drift with ringdown)
-          - Inter-modal frequency modulation (oscillatory pattern)
-    
+        Plot frequency deviation from mean for each detected mode,
+        with a moving average overlay to reveal underlying trends.
+
         Parameters
         ----------
         band_half : float  — Hz window either side of each peak (default 20)
         min_mag   : float  — minimum |z| threshold (default: median |z|)
+        ma_window : int    — moving average window in points (default 20),
+                            set to 0 to disable
         save_path : path   — PNG save path (optional)
         dpi       : int    — figure resolution
         """
         if not self.sig:
             self.eigenvalue_significance()
-    
+
         if min_mag is None:
             min_mag = float(np.median(self.sig['all_mag']))
-    
+
         peak_freqs = self.sig['peak_freqs']
         n_peaks    = len(peak_freqs)
         if n_peaks == 0:
             print('No peaks found in significance data.')
             return
-    
+
         fig, axes = plt.subplots(n_peaks, 1,
                                  figsize=(14, 3*n_peaks),
                                  sharex=True)
         if n_peaks == 1:
             axes = [axes]
-    
+
         for ax, pf in zip(axes, peak_freqs):
             mask = ((np.abs(self.sig['all_freqs'] - pf) < band_half) &
                     (self.sig['all_mag'] >= min_mag))
             f_band = self.sig['all_freqs'][mask]
             t_band = self.sig['all_times'][mask]
             m_band = self.sig['all_mag'][mask]
-    
+
             if len(f_band) == 0:
                 ax.set_title(f'{pf:.1f} Hz  — no data in band')
                 continue
-    
-            f_mean  = float(np.mean(f_band))
-            f_resid = f_band - f_mean
-    
-            sc = ax.scatter(t_band, f_resid, c=m_band,
-                            cmap='plasma', s=3, alpha=0.6)
+
+            # Sort by time
+            sort_idx = np.argsort(t_band)
+            t_sorted = t_band[sort_idx]
+            f_sorted = (f_band - float(np.mean(f_band)))[sort_idx]
+            m_sorted = m_band[sort_idx]
+
+            sc = ax.scatter(t_sorted, f_sorted, c=m_sorted,
+                            cmap='plasma', s=3, alpha=0.6, zorder=2)
             plt.colorbar(sc, ax=ax, label='|z|')
+
+            # Moving average overlay
+            if ma_window > 1 and len(f_sorted) > ma_window:
+                kernel = np.ones(ma_window) / ma_window
+                ma_f   = np.convolve(f_sorted, kernel, mode='valid')
+                half   = ma_window // 2
+                ma_t   = t_sorted[half : half + len(ma_f)]
+                ax.plot(ma_t, ma_f, color='cyan', lw=1.8,
+                        alpha=0.9, zorder=3, label=f'MA ({ma_window} pts)')
+                ax.legend(fontsize=8, loc='upper right')
+
             ax.axhline(0, color='k', lw=0.8, ls='--')
             ax.set_ylabel('Δf (Hz)')
-            ax.set_title(f'{pf:.1f} Hz  (mean={f_mean:.2f} Hz)')
+            ax.set_title(f'{pf:.1f} Hz  (mean={float(np.mean(f_band)):.2f} Hz)')
             ax.grid(True, alpha=0.3)
-    
+
         axes[-1].set_xlabel('Time (s)')
         fig.suptitle('Frequency Deviation from Mean (per mode)',
                      fontsize=13, fontweight='bold')
         plt.tight_layout()
-    
+
         if save_path:
             fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
             print(f'  Saved: {Path(save_path).name}')
