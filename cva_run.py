@@ -771,7 +771,7 @@ class CVARun:
     # ------------------------------------------------------------------
     # plot_frequency_deviation
     # ------------------------------------------------------------------
-    def plot_frequency_deviation(self, band_half=20.0, min_mag=0.99
+    def plot_frequency_deviation(self, band_half=20.0, min_mag=0.99, ma_window=20,
                                  ,
                                  save_path=None, dpi=150):
         """
@@ -824,9 +824,21 @@ class CVARun:
             f_mean  = float(np.mean(f_band))
             f_resid = f_band - f_mean
     
-            sc = ax.scatter(t_band, f_resid, c=m_band,
-                            cmap='plasma', s=3, alpha=0.6)
+            sort_idx = np.argsort(t_band)
+            t_sorted = t_band[sort_idx]
+            f_sorted = (f_band - float(np.mean(f_band)))[sort_idx]
+            m_sorted = m_band[sort_idx]
+            sc = ax.scatter(t_sorted, f_sorted, c=m_sorted,
+                            cmap='plasma', s=3, alpha=0.6, zorder=2)
             plt.colorbar(sc, ax=ax, label='|z|')
+            if ma_window > 1 and len(f_sorted) > ma_window:
+                kernel = np.ones(ma_window) / ma_window
+                ma_f   = np.convolve(f_sorted, kernel, mode='valid')
+                half   = ma_window // 2
+                ma_t   = t_sorted[half : half + len(ma_f)]
+                ax.plot(ma_t, ma_f, color='cyan', lw=1.8,
+                        alpha=0.9, zorder=3, label=f'MA ({ma_window} pts)')
+                ax.legend(fontsize=8, loc='upper right')
             ax.axhline(0, color='k', lw=0.8, ls='--')
             ax.set_ylabel('Δf (Hz)')
             ax.set_title(f'{pf:.1f} Hz  (mean={f_mean:.2f} Hz)')
