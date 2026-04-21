@@ -75,18 +75,18 @@ from cva_mode_shapes import CVAModeShapes
 # USER SETTINGS
 # =============================================================================
 
-DATA_FILE = '/Users/nhunterjr/Documents/Code/python/CVApy/bltimedata.txt'
+DATA_FILE = '/Users/nhunterjr/Documents/Code/python/CVApy/bltimedatashort.txt'
 # Save settings
 RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 SAVE_PLOTS   = True
 PLOT_DPI     = 150
 
 # CVA parameters
-LAGS        = 50
-TOL         = 1e-4
+LAGS        = 80
+TOL         = 1e-2
 NEIGHBORS   = 800
 RANKLOCK    = 0
-EVAL_STRIDE = 1
+EVAL_STRIDE = 10
 FS          = 3200
 
 # Clustering
@@ -101,7 +101,7 @@ F_MIN        = 50  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
 F_MAX        = 800 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
 
 # Mode shapes
-MIN_IM_FRAC  = 0.05
+MIN_IM_FRAC  = 0.15
 ZETA_MAX     = 0.5
 N_MODES_MAX  = 12
 
@@ -165,7 +165,9 @@ else:
 print(run)
 
 if PLOT_SIGNIFICANCE:
-    run.plot_significance(save_path=figpath('significance'), dpi=PLOT_DPI)
+   run.plot_significance(save_path=figpath('significance'), 
+                      dpi=PLOT_DPI,
+                      z_threshold=0.98)
 
 if PLOT_FREQ_DEVIATION:
     run.plot_frequency_deviation(
