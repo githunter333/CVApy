@@ -57,7 +57,7 @@ import sys
 import numpy as np
 from pathlib import Path
 
-CVAPY_DIR = Path('/Users/nhunterjr/Documents/Code/python/CVApy')
+CVAPY_DIR = Path(__file__).resolve().parent
 if str(CVAPY_DIR) not in sys.path:
     sys.path.insert(0, str(CVAPY_DIR))
 
@@ -75,19 +75,29 @@ from cva_mode_shapes import CVAModeShapes
 # USER SETTINGS
 # =============================================================================
 
-DATA_FILE = '/Users/nhunterjr/Documents/Code/python/CVApy/bltimedatashort.txt'
+#DATA_FILE = '/Users/nhunterjr/Waveforms 2/cvastructurehit1.txt'
+DATA_FILE= '/Users/nhunterjr/Waveforms 2/initial beam transient/square structure data/sstrdaa.txt'
 # Save settings
 RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 SAVE_PLOTS   = True
 PLOT_DPI     = 150
 
+SAVE_HDF5    = True
+
 # CVA parameters
-LAGS        = 80
+LAGS        = 50
 TOL         = 1e-2
-NEIGHBORS   = 800
+NEIGHBORS   =1000
 RANKLOCK    = 0
-EVAL_STRIDE = 10
-FS          = 3200
+EVAL_STRIDE = 1
+FS          = 5000
+N_JOBS      = 1    # 1=serial  -1=all cores (verified identical to serial)
+
+# Data column layout
+COL_TIME        = 0
+COL_FORCE       = 1
+COL_ACCEL_START = 2
+N_IN            = 1
 
 # Clustering
 K_MAX        = 8
@@ -97,8 +107,8 @@ N_CLUSTERS   = 0
 
 # Frequency band filter — applied to both clustering and mode shapes
 # Set F_MIN / F_MAX to None to disable (uses default 0.5 Hz lower bound only)
-F_MIN        = 50  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
-F_MAX        = 800 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
+F_MIN        = 20  # Hz  lower bound  (e.g. 5.0 to strip near-DC)
+F_MAX        = 400 # Hz  upper bound  (e.g. 100.0 for bookshelf data)
 
 # Mode shapes
 MIN_IM_FRAC  = 0.15
@@ -152,12 +162,14 @@ if RUN_CVA:
     cfg = CVAConfig(lags=LAGS, tol=TOL, neighbors=NEIGHBORS,
                     ranklock=RANKLOCK, eval_stride=EVAL_STRIDE, fs=FS)
     run = CVARun(cfg)
-    run.load_data(DATA_FILE, col_time=0, col_force=1, col_accel_start=7, n_in=6)
+    run.load_data(DATA_FILE, col_time=COL_TIME, col_force=COL_FORCE,
+                  col_accel_start=COL_ACCEL_START, n_in=N_IN)
     run.build_database()
-    run.run()
+    run.run(n_jobs=N_JOBS)
     run.eigenvalue_significance()
-    run.save(str(h5_run))
-    print(f'  Saved: {h5_run}')
+    if SAVE_HDF5:
+        run.save(str(h5_run))
+        print(f'  Saved: {h5_run}')
 else:
     print(f'\n--- Step 1: Loading from {h5_run.name} ---')
     run = CVARun.load(str(h5_run))
@@ -171,9 +183,10 @@ if PLOT_SIGNIFICANCE:
 
 if PLOT_FREQ_DEVIATION:
     run.plot_frequency_deviation(
-        band_half=20.0,
-        save_path=figpath('freq_deviation'),
-        dpi=PLOT_DPI)
+    band_half=20.0,
+    ma_window=20,
+    save_path=figpath('freq_deviation'),
+    dpi=PLOT_DPI)
     
 if PLOT_RECONSTRUCTION:
     run.plot_reconstruction(channel=0,
@@ -198,8 +211,9 @@ if RUN_CLUSTER:
                           n_pca_var=N_PCA_VAR, kmeans_rep=KMEANS_REP,
                           f_min=F_MIN, f_max=F_MAX)
     clust.fit(n_clusters=N_CLUSTERS)
-    clust.save(str(h5_clust))
-    print(f'  Saved: {h5_clust}')
+    if SAVE_HDF5:
+        clust.save(str(h5_clust))
+        print(f'  Saved: {h5_clust}')
 else:
     print(f'\n--- Step 2: Loading from {h5_clust.name} ---')
     clust = CVAPhiCluster.load(str(h5_clust), run)
@@ -229,8 +243,9 @@ if RUN_MODES:
                        f_min=F_MIN, zeta_max=ZETA_MAX,
                        n_modes_max=N_MODES_MAX)
     ms.extract()
-    ms.save(str(h5_modes))
-    print(f'  Saved: {h5_modes}')
+    if SAVE_HDF5:
+        ms.save(str(h5_modes))
+        print(f'  Saved: {h5_modes}')
 else:
     print(f'\n--- Step 3: Loading from {h5_modes.name} ---')
     ms = CVAModeShapes.load(str(h5_modes), run, clust)

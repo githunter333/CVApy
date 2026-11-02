@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Created on Sun Apr 19 15:50:57 2026
-
-@author: nhunterjr
+runcvatext.py
+=============
+Minimal single-stage example: run CVA on one file and plot the eigenvalue
+significance analysis. For the full three-stage pipeline use
+run_cva_pipeline.py, or launch the GUI with cva_gui.py.
 """
-import cva_run as run
+import sys
+from pathlib import Path
 
-from run import CVAConfig
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from cva_run import CVAConfig, CVARun
+
+DATA_FILE = Path(__file__).resolve().parent / 'bltimedatashort.txt'
 
 cfg = CVAConfig(
-    lags        = 32,    # ~12.5 ms at 2560 Hz, ~5 cycles at 400 Hz
+    lags        = 32,      # ~12.5 ms at 2560 Hz, ~5 cycles at 400 Hz
     tol         = 1e-4,
     neighbors   = 800,
     eval_stride = 5,
@@ -19,4 +25,9 @@ cfg = CVAConfig(
     freq_max    = 800.0,
 )
 
-run.plot_signifificance()
+run = CVARun(cfg)
+run.load_data(str(DATA_FILE), col_time=0, col_force=1, col_accel_start=2, n_in=1)
+run.build_database()
+run.run(n_jobs=1)
+run.eigenvalue_significance()
+run.plot_significance()

@@ -250,6 +250,9 @@ class CVAPhiCluster:
         self.plot_pca_scatter(save_path=sp('clusters_pca_scatter'), dpi=dpi)
 
     def plot_pca_variance(self, save_path=None, dpi=150):
+        if self._cum_var is None:
+            raise RuntimeError('No PCA variance curve available — call fit() first, '
+                               'or reload from a file saved by this version.')
         fig, ax = plt.subplots(figsize=(7, 4))
         ax.plot(np.arange(1, len(self._cum_var)+1), self._cum_var, 'b.-', ms=6, lw=1.2)
         ax.axvline(self._n_pca, color='r', ls='--', label=f'{self._n_pca} components')
@@ -260,7 +263,11 @@ class CVAPhiCluster:
         plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
 
     def plot_elbow(self, save_path=None, dpi=150):
-        k_arr = np.arange(1, self.k_max+1)
+        if self.inertia is None:
+            raise RuntimeError('No elbow sweep available — call fit() first, or '
+                               'reload from a file saved by this version.')
+        # k_max may disagree with a reloaded inertia array; the data wins.
+        k_arr = np.arange(1, len(self.inertia)+1)
         fig, ax = plt.subplots(figsize=(7, 4))
         ax.plot(k_arr, self.inertia, 'b.-', ms=10, lw=1.5, label='Inertia')
         ax.plot(self._k_elbow_d2, self.inertia[self._k_elbow_d2-1], 'rv',
@@ -375,6 +382,19 @@ class CVAPhiCluster:
             f.attrs['regime_A']   = self.regime_A
             f.attrs['regime_B']   = self.regime_B
             f.attrs['minority']   = self.minority if self.minority else [-1]
+            # fit settings + derived values the plots need after a reload
+            f.attrs['k_max']       = self.k_max
+            f.attrs['n_pca_var']   = self.n_pca_var
+            f.attrs['kmeans_rep']  = self.kmeans_rep
+            f.attrs['kmeans_iter'] = self.kmeans_iter
+            f.attrs['min_im_frac'] = self.min_im_frac
+            f.attrs['f_min']       = -1.0 if self.f_min is None else float(self.f_min)
+            f.attrs['f_max']       = -1.0 if self.f_max is None else float(self.f_max)
+            f.attrs['n_pca']       = self._n_pca
+            f.attrs['k_elbow_d2']  = self._k_elbow_d2
+            f.attrs['k_elbow_nd']  = self._k_elbow_nd
+            if self._cum_var is not None:
+                f.create_dataset('cum_var', data=self._cum_var)
             f.create_dataset('use_idx',       data=self.use_idx)
             f.create_dataset('cluster_ids',   data=self.cluster_ids)
             f.create_dataset('centroids_pca', data=self.centroids_pca)
@@ -395,8 +415,23 @@ class CVAPhiCluster:
     def load(cls, filepath, run):
         p = Path(filepath)
         print(f'Loading clusters from {p} ...')
-        obj = cls(run)
         with h5py.File(str(p), 'r') as f:
+            a = f.attrs
+            fmin = float(a.get('f_min', -1.0))
+            fmax = float(a.get('f_max', -1.0))
+            obj = cls(run,
+                      k_max       = int(a.get('k_max', 8)),
+                      n_pca_var   = float(a.get('n_pca_var', 95.0)),
+                      kmeans_rep  = int(a.get('kmeans_rep', 20)),
+                      kmeans_iter = int(a.get('kmeans_iter', 500)),
+                      min_im_frac = float(a.get('min_im_frac', 0.01)),
+                      f_min       = None if fmin < 0 else fmin,
+                      f_max       = None if fmax < 0 else fmax)
+            obj._n_pca        = int(a.get('n_pca', 0))
+            obj._k_elbow_d2   = int(a.get('k_elbow_d2', 0))
+            obj._k_elbow_nd   = int(a.get('k_elbow_nd', 0))
+            if 'cum_var' in f:
+                obj._cum_var  = f['cum_var'][:]
             obj.n_clusters    = int(f.attrs['n_clusters'])
             obj.rk_mode       = int(f.attrs['rk_mode'])
             obj.regime_A      = int(f.attrs['regime_A'])

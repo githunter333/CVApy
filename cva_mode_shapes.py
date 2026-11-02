@@ -255,6 +255,7 @@ class CVAModeShapes:
             f.attrs['min_im_frac'] = self.min_im_frac
             f.attrs['f_min']       = self.f_min
             f.attrs['zeta_max']    = self.zeta_max
+            f.attrs['n_modes_max'] = self.n_modes_max
             g = f.create_group('cluster_modes')
             for k, cm in enumerate(self.cluster_modes):
                 if cm is None:
@@ -277,6 +278,7 @@ class CVAModeShapes:
             obj.min_im_frac = float(f.attrs['min_im_frac'])
             obj.f_min       = float(f.attrs['f_min'])
             obj.zeta_max    = float(f.attrs['zeta_max'])
+            obj.n_modes_max = int(f.attrs.get('n_modes_max', obj.n_modes_max))
             g = f['cluster_modes']; n_k = int(f.attrs['n_clusters'])
             obj.cluster_modes = []
             for k in range(n_k):

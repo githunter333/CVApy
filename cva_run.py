@@ -47,7 +47,10 @@ class CVAConfig:
     fs:                     Optional[float] = None
     freq_min:               float = 0.0
     freq_max:               float = 0.0
-    sig_threshold_fraction: float = 0.05
+    sig_threshold_fraction: float = 0.25
+    sig_peak_mindist:       int   = 3     # minimum peak separation in histogram bins
+                                          # bin width = (freq_max-freq_min)/200 Hz
+                                          # increase to merge spurious nearby peaks
 
 
 # =============================================================================
@@ -668,7 +671,7 @@ class CVARun:
         f_cent  = 0.5*(f_edges[:-1]+f_edges[1:])
         hist_mag,_ = np.histogram(all_freqs, bins=f_edges, weights=all_mag)
         tval    = thresh*hist_mag.max() if hist_mag.max()>0 else 0
-        peak_idx= self._find_peaks(hist_mag, tval)
+        peak_idx= self._find_peaks(hist_mag, tval, self.cfg.sig_peak_mindist)
 
         print(f'  Eigenvalue observations : {len(all_freqs)}')
         print(f'  Peaks found             : {len(peak_idx)}')
@@ -772,7 +775,6 @@ class CVARun:
     # plot_frequency_deviation
     # ------------------------------------------------------------------
     def plot_frequency_deviation(self, band_half=20.0, min_mag=0.99, ma_window=20,
-                                 ,
                                  save_path=None, dpi=150):
         """
         Plot frequency deviation from mean for each detected mode.
@@ -992,6 +994,7 @@ class CVARun:
             g.attrs['fs']          = self.fs or 0.0
             g.attrs['freq_min']    = self.cfg.freq_min
             g.attrs['freq_max']    = self.cfg.freq_max
+            g.attrs['sig_peak_mindist'] = self.cfg.sig_peak_mindist
             g.attrs['data_file']   = (str(self.data_file)
                                       if self.data_file else '')
 
@@ -1055,7 +1058,8 @@ class CVARun:
                 eval_stride = int(ca['eval_stride']),
                 fs          = float(ca['fs']) or None,
                 freq_min    = float(ca['freq_min']),
-                freq_max    = float(ca['freq_max']))
+                freq_max    = float(ca['freq_max']),
+                sig_peak_mindist = int(ca.get('sig_peak_mindist', 3)))
             run = cls(cfg)
             run.fs        = float(ca['fs'])
             run.data_file = (Path(ca['data_file'])
