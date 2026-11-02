@@ -13,6 +13,12 @@ Left   : parameter panel (data layout, CVA, clustering, mode shapes, plots)
 Right  : one tab per figure, each with the standard Matplotlib toolbar
 Bottom : log pane fed by the pipeline's own stdout, plus a progress bar
 
+Workflow
+--------
+Choosing a record loads it straight away and shows the excitation and response
+spectral densities, so the drive band and the response can be checked before
+the sweep starts. Run Pipeline then reuses that already-parsed array.
+
 The pipeline runs on a QThread, so the window stays responsive during the
 multi-minute CVA sweep. Figures are built on the GUI thread afterwards and
 embedded with FigureCanvasQTAgg; the Matplotlib backend is Agg and
@@ -20,8 +26,10 @@ cva_plotting.set_show(False) is set, so no detached plot windows ever open.
 """
 from __future__ import annotations
 
+import signal
 import sys
 import traceback
+from collections import deque
 from pathlib import Path
 
 import matplotlib
@@ -30,13 +38,14 @@ import matplotlib
 matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg,
     NavigationToolbar2QT,
 )
 from matplotlib.figure import Figure
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
@@ -61,25 +70,31 @@ DEFAULT_RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 
 
 # =============================================================================
-# stdout -> Qt signal
+# stdout -> line buffer
 # =============================================================================
 
-class _SignalStream:
-    """File-like object that emits each completed line on a Qt signal."""
+class _LineBuffer:
+    """File-like object collecting completed lines for the GUI to drain.
 
-    def __init__(self, emit_line):
-        self._emit = emit_line
+    Deliberately holds no Qt objects. The CVA sweep prints from joblib
+    worker threads, and emitting a Qt signal from a thread Qt did not create
+    hangs the event loop — the GUI polls this buffer on a timer instead.
+    deque.append / popleft are atomic, so no lock is needed.
+    """
+
+    def __init__(self, sink: deque):
+        self._sink = sink
         self._buf = ''
 
     def write(self, text):
         self._buf += text
         while '\n' in self._buf:
             line, self._buf = self._buf.split('\n', 1)
-            self._emit(line)
+            self._sink.append(line)
 
     def flush(self):
         if self._buf:
-            self._emit(self._buf)
+            self._sink.append(self._buf)
             self._buf = ''
 
 
@@ -88,42 +103,50 @@ class _SignalStream:
 # =============================================================================
 
 class PipelineWorker(QObject):
-    log      = Signal(str)
-    progress = Signal(int, str)
     done     = Signal(object, object, object)   # run, clust, ms
     failed   = Signal(str)
 
-    def __init__(self, params, existing=None):
+    def __init__(self, params, existing=None, raw=None):
         super().__init__()
         self.p = params
         self.run_obj, self.clust_obj, self.ms_obj = existing or (None, None, None)
+        self.raw = raw                 # pre-parsed record from the PSD preview
+        self.lines = deque()           # log lines, drained by the GUI timer
+        self.status = (0, 'Starting …')      # (percent, stage text)
         self._stop = False
 
     def request_stop(self):
-        """Cooperative stop — honoured between stages, not mid-sweep."""
+        """Cooperative stop — polled once per window during the sweep and between
+        stages, so a long run gives up within a window rather than at the
+        end of the stage."""
         self._stop = True
 
-    def _emit_log(self, line):
-        self.log.emit(line)
-        # The CVA sweep prints lines like '   30.0%  (45/150)  elapsed=...'
-        s = line.strip()
-        if s and s[0].isdigit() and '%' in s.split()[0]:
-            try:
-                self.progress.emit(int(float(s.split('%')[0])), 'CVA sweep')
-            except ValueError:
-                pass
+    def stop_requested(self):
+        return self._stop
+
+    def _set(self, pct, label):
+        self.status = (pct, label)
+
+    def _cva_progress(self, done, total, elapsed, eta):
+        """Called from CVARun.run(), on joblib worker threads as well as
+        this one — so it only writes an attribute. Maps the sweep onto
+        5-55% of the bar."""
+        self._set(5 + int(50.0 * done / max(1, total)),
+                  f'Stage 1 — CVA sweep   {done}/{total}   '
+                  f'({done/max(1, total):.0%})   elapsed {elapsed:.0f}s'
+                  f'   eta {eta:.0f}s')
 
     @Slot()
     def execute(self):
         p = self.p
         saved_stdout = sys.stdout
-        sys.stdout = _SignalStream(self._emit_log)
+        sys.stdout = _LineBuffer(self.lines)
         try:
             run, clust, ms = self.run_obj, self.clust_obj, self.ms_obj
 
             # ---------------- Stage 1: CVA ----------------
             if p['run_cva']:
-                self.progress.emit(0, 'Stage 1 — CVA')
+                self._set(1, 'Stage 1 — reading record')
                 print('--- Step 1: CVA Run ---')
                 cfg = CVAConfig(
                     lags=p['lags'], tol=p['tol'], neighbors=p['neighbors'],
@@ -132,17 +155,23 @@ class PipelineWorker(QObject):
                     sig_threshold_fraction=p['sig_threshold_fraction'],
                     sig_peak_mindist=p['sig_peak_mindist'])
                 run = CVARun(cfg)
+                if self.raw is not None:
+                    print(f'Reusing the record read for the PSD preview: '
+                          f'{Path(p["data_file"]).name}')
                 run.load_data(p['data_file'], col_time=p['col_time'],
                               col_force=p['col_force'],
                               col_accel_start=p['col_accel_start'],
-                              n_in=p['n_in'])
+                              n_in=p['n_in'], raw=self.raw)
+                self._set(3, 'Stage 1 — building database')
                 run.build_database()
-                run.run(n_jobs=p['n_jobs'])
+                run.run(n_jobs=p['n_jobs'], progress_cb=self._cva_progress,
+                        stop_cb=self.stop_requested)
+                self._set(55, 'Stage 1 — eigenvalue significance')
                 run.eigenvalue_significance()
                 if p['save_hdf5']:
                     run.save(str(p['h5_run']))
             elif run is None:
-                self.progress.emit(0, 'Stage 1 — loading')
+                self._set(0, 'Stage 1 — loading')
                 print(f'--- Step 1: Loading {Path(p["h5_run"]).name} ---')
                 run = CVARun.load(str(p['h5_run']))
 
@@ -151,7 +180,7 @@ class PipelineWorker(QObject):
 
             # ---------------- Stage 2: clustering ----------------
             if p['run_cluster']:
-                self.progress.emit(55, 'Stage 2 — clustering')
+                self._set(60, 'Stage 2 — clustering Phi')
                 print('\n--- Step 2: Phi Clustering ---')
                 clust = CVAPhiCluster(run, k_max=p['k_max'],
                                       n_pca_var=p['n_pca_var'],
@@ -169,7 +198,7 @@ class PipelineWorker(QObject):
 
             # ---------------- Stage 3: mode shapes ----------------
             if p['run_modes'] and clust is not None:
-                self.progress.emit(80, 'Stage 3 — mode shapes')
+                self._set(85, 'Stage 3 — extracting mode shapes')
                 print('\n--- Step 3: Mode Shape Extraction ---')
                 ms = CVAModeShapes(run, clust, min_im_frac=p['min_im_frac'],
                                    f_min=p['f_min'], zeta_max=p['zeta_max'],
@@ -181,14 +210,67 @@ class PipelineWorker(QObject):
                 print(f'--- Step 3: Loading {Path(p["h5_modes"]).name} ---')
                 ms = CVAModeShapes.load(str(p['h5_modes']), run, clust)
 
-            self.progress.emit(100, 'Complete')
+            self._set(100, 'Complete')
             sys.stdout.flush()
             self.done.emit(run, clust, ms)
 
         except InterruptedError as e:
             sys.stdout.flush()
-            self.log.emit(f'\n*** {e} ***')
+            self.lines.append(f'\n*** {e} ***')
+            self._set(0, 'Stopped')
             self.done.emit(self.run_obj, self.clust_obj, self.ms_obj)
+        except Exception:
+            sys.stdout.flush()
+            self.failed.emit(traceback.format_exc())
+        finally:
+            sys.stdout = saved_stdout
+
+
+# =============================================================================
+# Preview worker — parses the record so its spectra can be plotted
+# =============================================================================
+
+class PreviewWorker(QObject):
+    """Reads a record off the GUI thread and hands back a loaded CVARun.
+
+    The run holds time / input / output arrays but no CVA results, which is
+    all plot_spectral_density() needs. The parsed array comes back too, so
+    the pipeline can skip a second np.loadtxt of the same file.
+    """
+
+    done   = Signal(object, object)      # run, raw
+    failed = Signal(str)
+
+    def __init__(self, params):
+        super().__init__()
+        self.p = params
+        self.lines = deque()
+        self.status = (0, 'Reading record …')
+
+    def request_stop(self):
+        """np.loadtxt cannot be interrupted — stopping just means waiting."""
+
+    @Slot()
+    def execute(self):
+        p = self.p
+        saved_stdout = sys.stdout
+        sys.stdout = _LineBuffer(self.lines)
+        try:
+            cfg = CVAConfig(
+                lags=p['lags'], tol=p['tol'], neighbors=p['neighbors'],
+                ranklock=p['ranklock'], eval_stride=p['eval_stride'],
+                fs=p['fs'], freq_min=p['freq_min'], freq_max=p['freq_max'],
+                sig_threshold_fraction=p['sig_threshold_fraction'],
+                sig_peak_mindist=p['sig_peak_mindist'])
+            run = CVARun(cfg)
+            print(f'Reading: {p["data_file"]}')
+            raw = np.loadtxt(str(p['data_file']))
+            run.load_data(p['data_file'], col_time=p['col_time'],
+                          col_force=p['col_force'],
+                          col_accel_start=p['col_accel_start'],
+                          n_in=p['n_in'], raw=raw)
+            sys.stdout.flush()
+            self.done.emit(run, raw)
         except Exception:
             sys.stdout.flush()
             self.failed.emit(traceback.format_exc())
@@ -219,6 +301,9 @@ class FigureTab(QWidget):
 # =============================================================================
 
 class ParamPanel(QScrollArea):
+
+    data_chosen = Signal(str)        # a record was picked from a dialog
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
@@ -311,6 +396,7 @@ class ParamPanel(QScrollArea):
         g = QGroupBox('Plots')
         f = QVBoxLayout(g)
         for key, label in (
+                ('plot_psd',            'Spectral density (excitation + response)'),
                 ('plot_significance',   'Eigenvalue significance'),
                 ('plot_freq_deviation', 'Frequency deviation'),
                 ('plot_reconstruction', 'Modal reconstruction'),
@@ -323,6 +409,8 @@ class ParamPanel(QScrollArea):
             f.addWidget(cb)
 
         pf = QFormLayout()
+        pf.addRow('PSD nperseg (0=auto)', self._spin('psd_nperseg', 0, 0, 65536))
+        pf.addRow('PSD f max (0=Nyq)', self._text('psd_fmax', '0'))
         pf.addRow('z threshold', self._text('z_threshold', '0.98'))
         pf.addRow('band half (Hz)', self._text('band_half', '20.0'))
         pf.addRow('MA window', self._spin('ma_window', 20, 1, 1000))
@@ -358,6 +446,7 @@ class ParamPanel(QScrollArea):
             'Text data (*.txt *.dat *.csv);;All files (*)')
         if fn:
             self.w['data_file'].setText(fn)
+            self.data_chosen.emit(fn)
 
     def _pick_results(self):
         d = QFileDialog.getExistingDirectory(
@@ -384,7 +473,8 @@ class ParamPanel(QScrollArea):
 
         for key in ('tol', 'fs', 'freq_min', 'freq_max',
                     'sig_threshold_fraction', 'n_pca_var', 'f_min', 'f_max',
-                    'min_im_frac', 'zeta_max', 'z_threshold', 'band_half'):
+                    'min_im_frac', 'zeta_max', 'z_threshold', 'band_half',
+                    'psd_fmax'):
             p[key] = num(key)
 
         p['fs'] = p['fs'] or None
@@ -420,11 +510,17 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.worker = None
         self._figs = []
+        self._raw = None          # (cache key, parsed array) for the loaded file
 
         self.params = ParamPanel()
         self.params.setMinimumWidth(330)
         self.params.setMaximumWidth(430)
+        self.params.data_chosen.connect(self.load_preview)
 
+        self.btn_preview = QPushButton('Load + PSD')
+        self.btn_preview.setToolTip(
+            'Read the record and plot excitation / response spectral density')
+        self.btn_preview.clicked.connect(self.load_preview)
         self.btn_run = QPushButton('Run Pipeline')
         self.btn_run.setDefault(True)
         self.btn_run.clicked.connect(self.start_pipeline)
@@ -436,6 +532,7 @@ class MainWindow(QMainWindow):
         self.btn_plots.clicked.connect(self.build_figures)
 
         btns = QHBoxLayout()
+        btns.addWidget(self.btn_preview)
         btns.addWidget(self.btn_run)
         btns.addWidget(self.btn_stop)
         btns.addWidget(self.btn_plots)
@@ -449,8 +546,9 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(False)
         self.tabs.setDocumentMode(True)
-        placeholder = QLabel('Select a data file and press Run Pipeline.\n\n'
-                             'Figures appear here, one tab each.')
+        placeholder = QLabel(
+            'Select a data file — its spectral density appears here.\n\n'
+            'Then press Run Pipeline. Figures appear as tabs, one each.')
         placeholder.setAlignment(Qt.AlignCenter)
         self.tabs.addTab(placeholder, 'Figures')
 
@@ -470,8 +568,18 @@ class MainWindow(QMainWindow):
         split.setSizes([370, 1130])
         self.setCentralWidget(split)
 
+        # Workers hand their output over through plain buffers; this timer
+        # is what moves it onto the screen (see _LineBuffer).
+        self._poll = QTimer(self)
+        self._poll.setInterval(100)
+        self._poll.timeout.connect(self._drain_worker)
+        self._last_status = None
+
         self.progress = QProgressBar()
-        self.progress.setMaximumWidth(260)
+        self.progress.setMaximumWidth(300)
+        self.progress.setMinimumWidth(240)
+        self.progress.setTextVisible(True)
+        self.progress.setFormat('%p%')
         self.progress.setValue(0)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().showMessage('Ready')
@@ -493,6 +601,9 @@ class MainWindow(QMainWindow):
         m.addAction(a)
 
         m = self.menuBar().addMenu('&Run')
+        a = QAction('Load Record + Spectral Density', self)
+        a.triggered.connect(self.load_preview)
+        m.addAction(a)
         a = QAction('Run Pipeline', self)
         a.triggered.connect(self.start_pipeline)
         m.addAction(a)
@@ -509,6 +620,93 @@ class MainWindow(QMainWindow):
     def set_progress(self, pct, label):
         self.progress.setValue(max(0, min(100, pct)))
         self.statusBar().showMessage(label)
+
+    # ------------------------------------------------------------------
+    def _drain_worker(self):
+        """Move whatever the worker has produced into the log and the bar."""
+        w = self.worker
+        if w is None:
+            return
+        lines = getattr(w, 'lines', None)
+        if lines:
+            while True:
+                try:
+                    self.append_log(lines.popleft())
+                except IndexError:
+                    break
+        status = getattr(w, 'status', None)
+        if status is not None and status != self._last_status:
+            self._last_status = status
+            self.set_progress(*status)
+
+    # ------------------------------------------------------------------
+    def _busy(self, busy, label=''):
+        """Indeterminate bar for work with no measurable progress."""
+        if busy:
+            self.progress.setRange(0, 0)
+            self.statusBar().showMessage(label)
+        else:
+            self.progress.setRange(0, 100)
+
+    # ------------------------------------------------------------------
+    def load_preview(self, *_):
+        """Parse the selected record and plot its spectral densities."""
+        if self.thread is not None:
+            return
+        try:
+            p = self.params.values()
+        except ValueError as e:
+            QMessageBox.warning(self, 'Check parameters', str(e))
+            return
+
+        self.logpane.clear()
+        self.append_log(f'--- Loading {Path(p["data_file"]).name} ---')
+        self.btn_run.setEnabled(False)
+        self.btn_preview.setEnabled(False)
+        self.btn_plots.setEnabled(False)
+        self._busy(True, 'Reading record …')
+
+        self.thread = QThread(self)
+        self.worker = PreviewWorker(p)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.execute)
+        self.worker.done.connect(self.on_preview_done)
+        self.worker.failed.connect(self.on_failed)
+        self._last_status = None
+        self._poll.start()
+        self.thread.start()
+
+    @Slot(object, object)
+    def on_preview_done(self, run, raw):
+        self._busy(False)
+        self._teardown_thread()
+        self._raw = (self._cache_key(run.data_file), raw)
+        # A new record invalidates anything held from the previous one.
+        self.run_obj, self.clust_obj, self.ms_obj = run, None, None
+        self.btn_plots.setEnabled(True)
+        self.progress.setValue(0)
+        self.build_figures()
+        # after build_figures, which writes its own status line
+        self.statusBar().showMessage(
+            f'{run.data_file.name} — {run.n_in} input'
+            f'{"s" if run.n_in > 1 else ""}, {run.n_out} responses, '
+            f'fs={run.fs:.1f} Hz, {len(run.time)} samples')
+
+    @staticmethod
+    def _cache_key(path):
+        p = Path(path)
+        try:
+            st = p.stat()
+            return (str(p.resolve()), st.st_mtime_ns, st.st_size)
+        except OSError:
+            return (str(p), 0, 0)
+
+    def _cached_raw(self, path):
+        """The parsed record, if the preview read this exact file."""
+        if self._raw is None:
+            return None
+        key, raw = self._raw
+        return raw if key == self._cache_key(path) else None
 
     # ------------------------------------------------------------------
     def start_pipeline(self):
@@ -533,39 +731,54 @@ class MainWindow(QMainWindow):
         self.append_log('=' * 62)
 
         self.btn_run.setEnabled(False)
+        self.btn_preview.setEnabled(False)
         self.btn_plots.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        self.progress.setValue(0)
+
+        # A preview-only run holds data but no windows — nothing to reuse.
+        existing = (self.run_obj, self.clust_obj, self.ms_obj)
+        if self.run_obj is not None and not self.run_obj.windows:
+            existing = (None, None, None)
 
         self.thread = QThread(self)
         self.worker = PipelineWorker(
-            p, existing=(self.run_obj, self.clust_obj, self.ms_obj))
+            p, existing=existing, raw=self._cached_raw(p['data_file']))
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.execute)
-        self.worker.log.connect(self.append_log)
-        self.worker.progress.connect(self.set_progress)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self.on_failed)
+        self._last_status = None
+        self._poll.start()
         self.thread.start()
 
     def stop_pipeline(self):
         if self.worker is not None:
             self.worker.request_stop()
-            self.statusBar().showMessage('Stopping after current stage …')
+            self.btn_stop.setEnabled(False)
+            self.statusBar().showMessage(
+                'Stopping — the sweep gives up at the next window …')
 
     def _teardown_thread(self):
+        self._drain_worker()          # whatever arrived since the last tick
+        self._poll.stop()
         if self.thread is not None:
             self.thread.quit()
             self.thread.wait()
             self.thread = None
             self.worker = None
         self.btn_run.setEnabled(True)
+        self.btn_preview.setEnabled(True)
         self.btn_stop.setEnabled(False)
 
     @Slot(object, object, object)
     def on_done(self, run, clust, ms):
-        self.run_obj, self.clust_obj, self.ms_obj = run, clust, ms
+        # A stopped run hands back None — keep the record already loaded so
+        # its spectra stay on screen instead of emptying the window.
+        if run is not None:
+            self.run_obj, self.clust_obj, self.ms_obj = run, clust, ms
         self._teardown_thread()
-        self.btn_plots.setEnabled(run is not None)
+        self.btn_plots.setEnabled(self.run_obj is not None)
         if run is not None:
             self.append_log('\n' + repr(run))
         if clust is not None:
@@ -576,6 +789,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_failed(self, tb):
+        self._busy(False)
         self._teardown_thread()
         self.progress.setValue(0)
         self.statusBar().showMessage('Failed')
@@ -601,19 +815,25 @@ class MainWindow(QMainWindow):
             self.tabs.clear()
 
             run, clust, ms = self.run_obj, self.clust_obj, self.ms_obj
+            has_cva = bool(run.windows)
             jobs = []
 
-            if p['plot_significance']:
+            if p['plot_psd'] and run.datout is not None:
+                jobs.append(('Spectral density',
+                             lambda: run.plot_spectral_density(
+                                 nperseg=p['psd_nperseg'],
+                                 f_max=p['psd_fmax'], dpi=p['dpi'])))
+            if p['plot_significance'] and has_cva:
                 jobs.append(('Significance', lambda: run.plot_significance(
                     z_threshold=p['z_threshold'] or None, dpi=p['dpi'])))
-            if p['plot_freq_deviation']:
+            if p['plot_freq_deviation'] and has_cva:
                 jobs.append(('Freq deviation', lambda: run.plot_frequency_deviation(
                     band_half=p['band_half'], ma_window=p['ma_window'],
                     dpi=p['dpi'])))
-            if p['plot_reconstruction']:
+            if p['plot_reconstruction'] and has_cva:
                 jobs.append(('Reconstruction', lambda: run.plot_reconstruction(
                     channel=p['channel'], dpi=p['dpi'])))
-            if p['plot_iterated']:
+            if p['plot_iterated'] and has_cva:
                 jobs.append(('Iterated pred.', lambda: run.plot_iterated_prediction(
                     channel=p['channel'], iter_K=p['iter_K'],
                     iter_stride=p['iter_stride'], dpi=p['dpi'])))
@@ -696,6 +916,14 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName('CVApy')
+
+    # Qt's event loop would otherwise swallow Ctrl+C in the launching
+    # terminal; the idle timer gives Python a chance to run the handler.
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    sigint_timer = QTimer()
+    sigint_timer.start(200)
+    sigint_timer.timeout.connect(lambda: None)
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

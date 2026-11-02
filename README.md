@@ -30,7 +30,21 @@ h5py 3.16.0, matplotlib 3.11.2, joblib 1.6.0, PySide6 6.11.3.
 conda activate cvapy && python cva_gui.py
 ```
 
-**Script** — edit the settings block at the top of `run_cva_pipeline.py`, then:
+Picking a record (Browse …, or File ▸ Open Data Record) reads it straight away
+and plots the excitation and response spectral densities, so the drive band and
+the response can be checked before committing to the sweep. **Run Pipeline**
+then reuses that already-parsed array instead of reading the file twice. The
+status bar carries the live stage, window count and ETA; the progress bar runs
+0–55 % over the CVA sweep (serial *and* parallel), then 60 % clustering, 85 %
+mode shapes.
+
+**Stop** is checked once per window, so a sweep gives up within one window
+instead of at the end of the stage; partial results are discarded. Ctrl+C in
+the launching terminal also quits. If the window is ever wedged beyond that,
+`pkill -f cva_gui.py`.
+
+**Script** — edit the settings block at the top of `run_cva_pipeline.py`
+(`PLOT_PSD` plots the same spectra right after the record is read), then:
 
 ```bash
 conda activate cvapy && python run_cva_pipeline.py
@@ -81,6 +95,12 @@ set `RUN_CVA` / `RUN_CLUSTER` / `RUN_MODES` to `False`.
 Every plot method builds a figure, optionally saves it, and **returns the
 `Figure`**. `plot_per_cluster` returns a list, one figure per cluster.
 
+`CVARun.plot_spectral_density()` needs `load_data()` only — no CVA results — so
+a record can be judged before the sweep. Three stacked panels: excitation PSD,
+response PSD with all channels overlaid, and response PSD per channel as a map.
+Welch segment length (`nperseg=0` picks it from the record) and the plotted
+`f_max` are exposed in the GUI's Plots group.
+
 Script use pops a window as before. A GUI embeds the returned figure instead and
 must first suppress the blocking show:
 
@@ -96,6 +116,18 @@ serially first to fix the model rank, which is then passed explicitly to every
 worker — so the parallel path is deterministic and produces results identical to
 the serial path (verified: equal ranks, `max |Δeigenvalue| = 0.0`), at roughly
 2× speedup on this hardware.
+
+`run(progress_cb=...)` reports `(done, total, elapsed, eta)` roughly 100 times
+per sweep on both paths; the GUI uses it to drive the progress bar, and scripts
+can ignore it and read the printed percentages instead. `run(stop_cb=...)` is
+polled once per window and raises `InterruptedError` when it returns True.
+
+**Do not emit a Qt signal from `progress_cb`, `stop_cb`, or anything else the
+parallel path calls.** Those run on joblib worker threads, which Qt did not
+create; emitting from them hangs the event loop, and the updates arrive in one
+batch after the sweep finishes — if they arrive at all. The GUI's workers write
+their progress and log lines into plain attributes and a `deque`, and a
+`QTimer` on the GUI thread moves them onto the screen.
 
 ## Repository notes
 

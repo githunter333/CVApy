@@ -121,6 +121,7 @@ RUN_CLUSTER = True
 RUN_MODES   = True
 
 # Plot flags
+PLOT_PSD            = True     # excitation / response spectra, before the sweep
 PLOT_SIGNIFICANCE   = True
 PLOT_RECONSTRUCTION = True
 PLOT_CLUSTERS       = True
@@ -164,6 +165,9 @@ if RUN_CVA:
     run = CVARun(cfg)
     run.load_data(DATA_FILE, col_time=COL_TIME, col_force=COL_FORCE,
                   col_accel_start=COL_ACCEL_START, n_in=N_IN)
+    if PLOT_PSD:
+        run.plot_spectral_density(save_path=figpath('spectral_density'),
+                                  dpi=PLOT_DPI)
     run.build_database()
     run.run(n_jobs=N_JOBS)
     run.eigenvalue_significance()

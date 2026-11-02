@@ -19,6 +19,7 @@ Date:   2026-04-16
 """
 
 from __future__ import annotations
+import threading
 import time
 import warnings
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from typing import List, Optional
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.signal import welch
 from sklearn.neighbors import NearestNeighbors
 
 from cva_core import cvaonestep, delaybuild, reset_cva_state
@@ -96,13 +98,24 @@ class CVARun:
     # load_data
     # ------------------------------------------------------------------
     def load_data(self, filepath, col_time=0, col_force=1,
-                  col_accel_start=2, n_in=1):
+                  col_accel_start=2, n_in=1, raw=None):
+        """
+        Read a whitespace/comma delimited record and split it into
+        time / input / output arrays.
+
+        raw : optional (N, n_col) array already read from the file. Lets a
+              caller that has parsed the file once (e.g. the GUI's PSD
+              preview) re-slice it without a second np.loadtxt.
+        """
         p = Path(filepath)
         if not p.exists():
             raise FileNotFoundError(f'Not found: {p}')
         self.data_file = p
-        print(f'Loading: {p}')
-        raw = np.loadtxt(str(p))
+        if raw is None:
+            print(f'Loading: {p}')
+            raw = np.loadtxt(str(p))
+        else:
+            raw = np.asarray(raw)     # caller has already announced the read
         self.time   = raw[:, col_time]
         self.inputd = raw[:, col_force:col_force+n_in]
         self.datout = raw[:, col_accel_start:]
@@ -116,6 +129,113 @@ class CVARun:
         print(f'  Samples : {N}  ({N/self.fs:.2f} s)')
         print(f'  Outputs : {self.n_out}   Inputs : {self.n_in}')
         print(f'  Fs      : {self.fs:.1f} Hz')
+
+    # ------------------------------------------------------------------
+    # plot_spectral_density
+    # ------------------------------------------------------------------
+    def plot_spectral_density(self, nperseg=0, f_max=0.0, db_range=120.0,
+                              save_path=None, dpi=150):
+        """
+        Welch power spectral density of the excitation and response channels.
+
+        Needs load_data() only — no CVA results — so a record can be judged
+        before committing to a multi-minute sweep: where the drive has energy,
+        which response bands are excited, and whether any channel is dead or
+        clipped.
+
+        Parameters
+        ----------
+        nperseg   : Welch segment length in samples. 0 = largest power of two
+                    up to 4096 that fits the record.
+        f_max     : upper frequency limit of the plots. 0 = Nyquist.
+        db_range  : dB shown below each panel's peak.
+
+        Returns the Figure (three stacked panels: excitation PSD, response
+        PSD overlay, response PSD per channel as a map).
+        """
+        if self.datout is None:
+            raise RuntimeError('Call load_data() first')
+
+        N = self.datout.shape[0]
+        if not nperseg:
+            nperseg = int(2 ** np.floor(np.log2(min(N, 4096))))
+        nperseg = int(max(64, min(nperseg, N)))
+
+        f, pxx_in  = welch(self.inputd, fs=self.fs, nperseg=nperseg, axis=0)
+        _, pxx_out = welch(self.datout, fs=self.fs, nperseg=nperseg, axis=0)
+        f_hi = f_max if f_max and f_max < f[-1] else f[-1]
+        keep = f <= f_hi
+        f = f[keep]
+        pxx_in, pxx_out = pxx_in[keep, :], pxx_out[keep, :]
+
+        def _db(x):
+            return 10.0 * np.log10(np.clip(x, 1e-30, None))
+
+        db_in, db_out = _db(pxx_in), _db(pxx_out)
+        df = f[1] - f[0] if len(f) > 1 else 0.0
+
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True,
+                                 layout='constrained')
+        fig.suptitle(
+            f'Spectral Density — {self.data_file.name if self.data_file else ""}\n'
+            f'fs={self.fs:.1f} Hz   {N} samples ({N/self.fs:.2f} s)   '
+            f'nperseg={nperseg}   df={df:.2f} Hz',
+            fontsize=12, fontweight='bold')
+
+        # ---- excitation ------------------------------------------------
+        ax = axes[0]
+        for i in range(self.n_in):
+            ax.plot(f, db_in[:, i], lw=1.0, label=f'Input {i+1}')
+        pk = db_in.max()
+        ax.set_ylim(pk - db_range, pk + 5)
+        ax.set_ylabel('PSD (dB)')
+        ax.set_title(f'Excitation — {self.n_in} channel'
+                     f'{"s" if self.n_in > 1 else ""}')
+        if self.n_in <= 8:
+            ax.legend(fontsize=8, loc='upper right')
+        ax.grid(True, alpha=0.3, which='both')
+
+        # ---- response overlay ------------------------------------------
+        ax = axes[1]
+        for j in range(self.n_out):
+            ax.plot(f, db_out[:, j], lw=0.6, alpha=0.45, color='steelblue')
+        mean_db = _db(pxx_out.mean(axis=1))
+        ax.plot(f, mean_db, lw=1.6, color='darkorange',
+                label='Mean across channels')
+        pk = db_out.max()
+        ax.set_ylim(pk - db_range, pk + 5)
+        ax.set_ylabel('PSD (dB)')
+        ax.set_title(f'Response — {self.n_out} channels overlaid')
+        ax.legend(fontsize=8, loc='upper right')
+        ax.grid(True, alpha=0.3, which='both')
+
+        # ---- response channel map --------------------------------------
+        ax = axes[2]
+        pk = db_out.max()
+        im = ax.imshow(db_out.T, aspect='auto', origin='lower',
+                       extent=[f[0], f[-1], -0.5, self.n_out - 0.5],
+                       cmap='viridis', vmin=pk - db_range, vmax=pk)
+        # Spans all three panels so the shared frequency axis stays aligned.
+        fig.colorbar(im, ax=list(axes), label='PSD (dB)')
+        ax.set_ylabel('Response channel')
+        ax.set_xlabel('Frequency (Hz)')
+        ax.set_title('Response PSD per channel')
+
+        # CVA analysis band, when it is narrower than the plotted axis
+        lo, hi = self.cfg.freq_min, self.cfg.freq_max
+        if hi and (lo > f[0] or hi < f[-1]):
+            for a in axes[:2]:
+                a.axvspan(lo, min(hi, f[-1]), color='k', alpha=0.05,
+                          zorder=0)
+                a.axvline(lo, color='k', ls=':', lw=0.8)
+                a.axvline(min(hi, f[-1]), color='k', ls=':', lw=0.8)
+
+        axes[0].set_xlim(f[0], f[-1])
+        if save_path:
+            fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
+            print(f'  Saved: {Path(save_path).name}')
+        show_if_enabled()
+        return fig
 
     # ------------------------------------------------------------------
     # build_database
@@ -135,7 +255,7 @@ class CVARun:
     # ------------------------------------------------------------------
     # run
     # ------------------------------------------------------------------
-    def run(self, n_jobs=1):
+    def run(self, n_jobs=1, progress_cb=None, stop_cb=None):
         """
         Run CVA over all windows.
 
@@ -146,6 +266,19 @@ class CVARun:
             -1 = use all available CPU cores.
             Requires ranklock > 0 OR runs window 0 serially first to
             determine rank, then parallelizes remaining windows.
+        progress_cb : callable(done, total, elapsed, eta) or None
+            Called as the sweep advances, on both the serial and the
+            parallel path, roughly 100 times per run. Used by the GUI to
+            drive its progress bar; a script can leave it None and read the
+            printed percentages instead.
+
+            It may be called from a joblib worker thread, so it must be
+            cheap and thread-safe — set a value and return. Emitting a Qt
+            signal from it will deadlock the GUI.
+        stop_cb : callable() -> bool or None
+            Polled once per window. Returning True abandons the sweep and
+            raises InterruptedError, so a long run can be cancelled without
+            waiting for the stage to finish.
         """
         if self.past_db is None:
             raise RuntimeError('Call build_database() first')
@@ -161,6 +294,26 @@ class CVARun:
         self.windows = []
         reset_cva_state()
         t_start = time.time()
+        print_every = max(1, n_eval // 10)
+        last_report = [0.0]
+
+        def _stop_requested():
+            return stop_cb is not None and stop_cb()
+
+        def _report(done):
+            """One window finished. Prints every 10%, and calls progress_cb
+            at most four times a second — often enough for a smooth bar,
+            seldom enough to cost nothing on a fast sweep."""
+            now = time.time()
+            el  = now - t_start
+            eta = el / done * (n_eval - done) if done else 0.0
+            if done % print_every == 0 or done == n_eval:
+                print(f'  {done/n_eval*100:5.1f}%  ({done}/{n_eval})'
+                      f'  elapsed={el:.1f}s  eta={eta:.1f}s', flush=True)
+            if progress_cb is not None and (now - last_report[0] >= 0.25
+                                            or done == n_eval):
+                last_report[0] = now
+                progress_cb(done, n_eval, el, eta)
 
         # ----------------------------------------------------------
         # Determine ranklock from first window (serial)
@@ -203,6 +356,10 @@ class CVARun:
         # ----------------------------------------------------------
         if n_jobs == 1 or len(remaining) == 0:
             for ki, kw in enumerate(remaining, start=1):
+                if _stop_requested():
+                    raise InterruptedError(
+                        f'CVA sweep stopped after {len(self.windows)} '
+                        f'of {n_eval} windows')
                 inow = kw + lags
                 try:
                     result = cvaonestep(
@@ -228,12 +385,7 @@ class CVARun:
                 except Exception as e:
                     warnings.warn(f'Window {kw} failed: {e}')
 
-                if (ki) % max(1, n_eval//10) == 0:
-                    el  = time.time() - t_start
-                    eta = el / ki * (n_eval - ki)
-                    pct = ki / n_eval * 100
-                    print(f'  {pct:5.1f}%  ({ki}/{n_eval})'
-                          f'  elapsed={el:.1f}s  eta={eta:.1f}s', flush=True)
+                _report(ki + 1)
 
         # ----------------------------------------------------------
         # Parallel path
@@ -243,7 +395,8 @@ class CVARun:
                 from joblib import Parallel, delayed
             except ImportError:
                 warnings.warn('joblib not installed — falling back to serial. pip install joblib')
-                return self.run(n_jobs=1)
+                return self.run(n_jobs=1, progress_cb=progress_cb,
+                                stop_cb=stop_cb)
 
             # Capture arrays as local variables for pickling
             past_db   = self.past_db
@@ -251,7 +404,23 @@ class CVARun:
             inputd    = self.inputd
             time_vec  = self.time
 
+            # Workers are threads, so a plain lock is enough to keep the
+            # finished-window count and its reports serialised.
+            tick_lock = threading.Lock()
+            n_done    = [1]          # window 0 already ran above
+            stopped   = [False]
+
+            def _tick():
+                with tick_lock:
+                    n_done[0] += 1
+                    _report(n_done[0])
+
             def _run_window(kw):
+                if stopped[0] or _stop_requested():
+                    # Returning early lets the queued windows drain in
+                    # milliseconds instead of cancelling mid-factorisation.
+                    stopped[0] = True
+                    return None
                 inow = kw + lags
                 try:
                     result = cvaonestep(
@@ -272,6 +441,8 @@ class CVARun:
                 except Exception as e:
                     warnings.warn(f'Window {kw} failed: {e}')
                     return None
+                finally:
+                    _tick()
 
             print(f'  Launching parallel jobs (n_jobs={n_jobs}) ...')
             raw = Parallel(n_jobs=n_jobs, prefer='threads')(
@@ -297,6 +468,11 @@ class CVARun:
 
             # Sort windows by index so downstream code stays consistent
             self.windows.sort(key=lambda w: w.window_idx)
+
+            if stopped[0]:
+                raise InterruptedError(
+                    f'CVA sweep stopped after {len(self.windows)} '
+                    f'of {n_eval} windows')
 
         print(f'\nDone. {len(self.windows)} windows in '
               f'{time.time()-t_start:.1f}s')
