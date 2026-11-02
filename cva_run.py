@@ -31,6 +31,7 @@ import numpy as np
 from sklearn.neighbors import NearestNeighbors
 
 from cva_core import cvaonestep, delaybuild, reset_cva_state
+from cva_plotting import show_if_enabled
 
 
 # =============================================================================
@@ -426,7 +427,7 @@ class CVARun:
         reanchor:     bool = True,
         save_path     = None,
         dpi:          int  = 150,
-    ) -> None:
+    ):
         """
         Multi-step iterated prediction for one output channel.
 
@@ -629,7 +630,8 @@ class CVARun:
         if save_path:
             fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
             print(f'  Saved: {Path(save_path).name}')
-        plt.show()
+        show_if_enabled()
+        return fig
 
         if rms_divs:
             print(f'  Ch {ch+1}: median RMS divergence = '
@@ -769,7 +771,8 @@ class CVARun:
         if save_path:
             fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
             print(f'  Saved: {Path(save_path).name}')
-        plt.show()
+        show_if_enabled()
+        return fig
         
     # ------------------------------------------------------------------
     # plot_frequency_deviation
@@ -854,7 +857,8 @@ class CVARun:
         if save_path:
             fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
             print(f'  Saved: {Path(save_path).name}')
-        plt.show()
+        show_if_enabled()
+        return fig
 
     # ------------------------------------------------------------------
     # plot_reconstruction
@@ -976,7 +980,8 @@ class CVARun:
         if save_path:
             fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
             print(f'  Saved: {Path(save_path).name}')
-        plt.show()
+        show_if_enabled()
+        return fig
 
     # ------------------------------------------------------------------
     # save

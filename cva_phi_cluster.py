@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+from cva_plotting import show_if_enabled
 
 from cva_run import CVARun
 
@@ -260,7 +261,8 @@ class CVAPhiCluster:
         ax.set_xlabel('PCA Component'); ax.set_ylabel('Cumulative Variance (%)')
         ax.set_title('Phi Matrix PCA — Cumulative Variance')
         ax.legend(); ax.grid(True)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_elbow(self, save_path=None, dpi=150):
         if self.inertia is None:
@@ -276,7 +278,8 @@ class CVAPhiCluster:
                 ms=12, label=f'Normalized  k={self._k_elbow_nd}')
         ax.set_xlabel('k'); ax.set_ylabel('Inertia')
         ax.set_title('Elbow Plot'); ax.legend(); ax.grid(True)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_regime_timeseries(self, save_path=None, dpi=150):
         windows = self.run.windows
@@ -304,7 +307,8 @@ class CVAPhiCluster:
         axes[2].set_yticks(range(k))
         axes[2].set_xlabel('Time (s)'); axes[2].set_ylabel('Cluster')
         axes[2].grid(True)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_eigenvalues_zplane(self, save_path=None, dpi=150):
         dt = 1.0/self.run.fs; fs = self.run.fs
@@ -333,7 +337,8 @@ class CVAPhiCluster:
         ax.set_title('Mean Eigenvalues per Cluster — z-plane  (direct averaging)')
         ax.legend(loc='best'); ax.grid(True); ax.set_aspect('equal')
         lim = 1.3; ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_cluster_amplitude(self, save_path=None, dpi=150):
         k    = self.n_clusters
@@ -352,7 +357,8 @@ class CVAPhiCluster:
         ax.set_xlabel('Local RMS Amplitude  (Ch 1)'); ax.set_ylabel('Count')
         ax.set_title('Cluster Assignment vs Local Response Amplitude')
         ax.legend(); ax.grid(True)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_pca_scatter(self, save_path=None, dpi=150):
         k    = self.n_clusters
@@ -370,7 +376,8 @@ class CVAPhiCluster:
         ax.set_xlabel('PCA Component 1'); ax.set_ylabel('PCA Component 2')
         ax.set_title('Phi Matrices in PCA Space  (+ = centroid)')
         ax.legend(loc='best', fontsize=8); ax.grid(True)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     # ------------------------------------------------------------------
     def save(self, filepath):

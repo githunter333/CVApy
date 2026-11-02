@@ -23,6 +23,8 @@ from typing import List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
+from cva_plotting import show_if_enabled
+
 
 def _savefig(fig, save_path, dpi):
     if save_path:
@@ -96,7 +98,8 @@ def plot_nonlinearity_localization(ms, clust, nl_ch_pair=(2, 3),
     axes[1].set_xlabel('Frequency (Hz)'); axes[1].set_ylabel('Frequency Shift A-B (%)')
     axes[1].set_title('Frequency Shift vs Mode Frequency'); axes[1].grid(True, alpha=0.3)
 
-    plt.tight_layout(); _savefig(fig, save_path, dpi); plt.show()
+    plt.tight_layout(); _savefig(fig, save_path, dpi); show_if_enabled()
+    return fig
 
 
 # =============================================================================
@@ -137,7 +140,8 @@ def plot_frequency_shift_summary(ms, clust, freq_max=0.0,
     ax.set_title(f'Frequency Shift per Mode — Cluster {rA} vs {rB}'
                  + (f'  ({title_suffix})' if title_suffix else ''))
     ax.grid(True, axis='x', alpha=0.3)
-    plt.tight_layout(); _savefig(fig, save_path, dpi); plt.show()
+    plt.tight_layout(); _savefig(fig, save_path, dpi); show_if_enabled()
+    return fig
 
 
 # =============================================================================
@@ -211,7 +215,8 @@ def compare_significance(run1, run2, label1='Run 1', label2='Run 2',
     ax.set_xlabel('Frequency (Hz)'); ax.set_ylabel('Cumulative Magnitude')
     ax.set_title(f'Significance Comparison: {label1} vs {label2}')
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
-    plt.tight_layout(); _savefig(fig, save_path, dpi); plt.show()
+    plt.tight_layout(); _savefig(fig, save_path, dpi); show_if_enabled()
+    return fig
 
 
 # =============================================================================
@@ -253,4 +258,5 @@ def plot_pole_trajectories(runs, clusts, labels=None, regime='A',
     ax.set_title(f'Pole Trajectories — Regime {regime}\n({len(runs)} runs overlaid)')
     ax.legend(loc='best', fontsize=8); ax.grid(True, alpha=0.3)
     ax.set_aspect('equal'); lim=1.2; ax.set_xlim(-lim,lim); ax.set_ylim(-lim,lim)
-    plt.tight_layout(); _savefig(fig, save_path, dpi); plt.show()
+    plt.tight_layout(); _savefig(fig, save_path, dpi); show_if_enabled()
+    return fig

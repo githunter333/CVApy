@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from cva_phi_cluster import CVAPhiCluster
+from cva_plotting import show_if_enabled
 from cva_run import CVARun
 
 
@@ -187,9 +188,11 @@ class CVAModeShapes:
             ax.set_title(f'Mode {mi+1}\nA: {mA.freq[mi]:.2f} Hz  '
                          f'B: {mB.freq[mi]:.2f} Hz  Δ={pct:+.1f}%')
             ax.legend(fontsize=7, loc='best'); ax.grid(True)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_per_cluster(self, save_path=None, dpi=150):
+        figs = []
         for k, cm in enumerate(self.cluster_modes):
             if cm is None: continue
             n_plot = min(cm.shapes.shape[1], self.n_modes_max)
@@ -210,7 +213,9 @@ class CVAModeShapes:
                 ax.legend(fontsize=7, loc='best'); ax.grid(True)
             sp = (Path(str(save_path).replace('.png', f'_cluster{k}.png'))
                   if save_path else None)
-            plt.tight_layout(); self._savefig(fig, sp, dpi); plt.show()
+            plt.tight_layout(); self._savefig(fig, sp, dpi); show_if_enabled()
+            figs.append(fig)
+        return figs
 
     def plot_magnitude_overlay(self, save_path=None, dpi=150):
         clust   = self.clust
@@ -237,7 +242,8 @@ class CVAModeShapes:
             ax.set_ylabel('|Magnitude| (normalized)')
             ax.set_title(f'Mode {mi+1}')
             ax.legend(fontsize=7, loc='best'); ax.grid(True)
-        plt.tight_layout(); self._savefig(fig, save_path, dpi); plt.show()
+        plt.tight_layout(); self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_all(self, save_dir=None, dpi=150):
         def sp(name):
