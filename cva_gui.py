@@ -9,15 +9,22 @@ PySide6 desktop front end for the CVApy three-stage pipeline.
 
 Layout
 ------
-Left   : parameter panel (data layout, CVA, clustering, mode shapes, plots)
+Left   : parameter panel (record, analysis window, CVA, clustering, modes)
 Right  : one tab per figure, each with the standard Matplotlib toolbar
 Bottom : log pane fed by the pipeline's own stdout, plus a progress bar
 
 Workflow
 --------
-Choosing a record loads it straight away and shows the excitation and response
-spectral densities, so the drive band and the response can be checked before
-the sweep starts. Run Pipeline then reuses that already-parsed array.
+Choosing a record inspects it at once — header rows, delimiter, channel names
+and units, whether there is a time column, whether an in/out sibling exists —
+and fills the Record panel from what it finds. The record then loads in full
+and appears as a time history and a spectral density.
+
+The analysis window is chosen from the time history: drag across any panel,
+type the times, or press Suggest. Run Pipeline applies the window and reuses
+the already-parsed arrays rather than reading the files again.
+
+See cva_record.py for the three record shapes this handles.
 
 The pipeline runs on a QThread, so the window stays responsive during the
 multi-minute CVA sweep. Figures are built on the GUI thread afterwards and
@@ -30,6 +37,7 @@ import signal
 import sys
 import traceback
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 import matplotlib
@@ -44,14 +52,16 @@ from matplotlib.backends.backend_qtagg import (
     NavigationToolbar2QT,
 )
 from matplotlib.figure import Figure
+from matplotlib.widgets import SpanSelector
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
-    QTabWidget, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -60,9 +70,17 @@ import cva_plotting
 
 cva_plotting.set_show(False)          # the GUI owns every figure
 
+import cva_record
+from cva_record import RecordSpec, default_spec, sniff_record
 from cva_mode_shapes import CVAModeShapes
 from cva_phi_cluster import CVAPhiCluster
 from cva_run import CVAConfig, CVARun
+
+ROLES = ('Time', 'Excitation', 'Response', 'Ignore')
+
+# What 'Suggest' is willing to spend on a sweep, in windows. Only a ceiling:
+# a transient whose ringdown is shorter gets the shorter window.
+SUGGEST_MAX_WINDOWS = 5000
 
 plt.rcParams['figure.max_open_warning'] = 0
 
@@ -106,11 +124,11 @@ class PipelineWorker(QObject):
     done     = Signal(object, object, object)   # run, clust, ms
     failed   = Signal(str)
 
-    def __init__(self, params, existing=None, raw=None):
+    def __init__(self, params, existing=None, cache=None):
         super().__init__()
         self.p = params
         self.run_obj, self.clust_obj, self.ms_obj = existing or (None, None, None)
-        self.raw = raw                 # pre-parsed record from the PSD preview
+        self.cache = dict(cache) if cache else {}   # arrays read by the preview
         self.lines = deque()           # log lines, drained by the GUI timer
         self.status = (0, 'Starting …')      # (percent, stage text)
         self._stop = False
@@ -155,13 +173,10 @@ class PipelineWorker(QObject):
                     sig_threshold_fraction=p['sig_threshold_fraction'],
                     sig_peak_mindist=p['sig_peak_mindist'])
                 run = CVARun(cfg)
-                if self.raw is not None:
-                    print(f'Reusing the record read for the PSD preview: '
-                          f'{Path(p["data_file"]).name}')
-                run.load_data(p['data_file'], col_time=p['col_time'],
-                              col_force=p['col_force'],
-                              col_accel_start=p['col_accel_start'],
-                              n_in=p['n_in'], raw=self.raw)
+                if self.cache:
+                    print('Reusing the record read for the preview')
+                print(f'Record: {p["spec"].summary()}')
+                run.load_record(p['spec'], cache=self.cache)
                 self._set(3, 'Stage 1 — building database')
                 run.build_database()
                 run.run(n_jobs=p['n_jobs'], progress_cb=self._cva_progress,
@@ -238,12 +253,13 @@ class PreviewWorker(QObject):
     the pipeline can skip a second np.loadtxt of the same file.
     """
 
-    done   = Signal(object, object)      # run, raw
+    done   = Signal(object, object)      # run, {path: array}
     failed = Signal(str)
 
-    def __init__(self, params):
+    def __init__(self, params, cache=None):
         super().__init__()
         self.p = params
+        self.cache = dict(cache) if cache else {}
         self.lines = deque()
         self.status = (0, 'Reading record …')
 
@@ -263,14 +279,13 @@ class PreviewWorker(QObject):
                 sig_threshold_fraction=p['sig_threshold_fraction'],
                 sig_peak_mindist=p['sig_peak_mindist'])
             run = CVARun(cfg)
-            print(f'Reading: {p["data_file"]}')
-            raw = np.loadtxt(str(p['data_file']))
-            run.load_data(p['data_file'], col_time=p['col_time'],
-                          col_force=p['col_force'],
-                          col_accel_start=p['col_accel_start'],
-                          n_in=p['n_in'], raw=raw)
+            # The preview always reads the whole record: the time window is
+            # chosen by looking at it, so it cannot be applied beforehand.
+            spec = replace(p['spec'], t_start=None, t_end=None)
+            print(f'Record: {spec.summary()}')
+            run.load_record(spec, cache=self.cache)
             sys.stdout.flush()
-            self.done.emit(run, raw)
+            self.done.emit(run, self.cache)
         except Exception:
             sys.stdout.flush()
             self.failed.emit(traceback.format_exc())
@@ -302,7 +317,9 @@ class FigureTab(QWidget):
 
 class ParamPanel(QScrollArea):
 
-    data_chosen = Signal(str)        # a record was picked from a dialog
+    data_chosen       = Signal(str)   # a record was picked from a dialog
+    window_changed    = Signal()      # t_start / t_end edited by hand
+    suggest_requested = Signal()      # 'Suggest' pressed
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -312,11 +329,14 @@ class ParamPanel(QScrollArea):
         root = QVBoxLayout(inner)
         self.w = {}
 
-        # ---------- data ----------
-        g = QGroupBox('Data')
+        # ---------- record ----------
+        self._info = None          # sniff of the selected file
+        self._pair_info = None     # sniff of its in/out sibling, if any
+
+        g = QGroupBox('Record')
         f = QFormLayout(g)
         self.w['data_file'] = QLineEdit()
-        self.w['data_file'].setPlaceholderText('select a .txt record …')
+        self.w['data_file'].setPlaceholderText('select a record …')
         browse = QPushButton('Browse …')
         browse.clicked.connect(self._pick_data)
         row = QHBoxLayout()
@@ -326,22 +346,73 @@ class ParamPanel(QScrollArea):
         rw.setLayout(row)
         f.addRow('File', rw)
 
-        self.w['results_root'] = QLineEdit(str(DEFAULT_RESULTS_ROOT))
-        pick_out = QPushButton('…')
-        pick_out.setFixedWidth(30)
-        pick_out.clicked.connect(self._pick_results)
-        row2 = QHBoxLayout()
-        row2.addWidget(self.w['results_root'])
-        row2.addWidget(pick_out)
-        rw2 = QWidget()
-        rw2.setLayout(row2)
-        f.addRow('Results root', rw2)
+        # Only used for the '<base>in.dat' / '<base>out.dat' records, where
+        # the excitation and the responses are in separate files. Filled in
+        # automatically when the sibling is found on disk.
+        self.w['pair_file'] = QLineEdit()
+        self.w['pair_file'].setPlaceholderText('(all channels in one file)')
+        pair_btn = QPushButton('…')
+        pair_btn.setFixedWidth(30)
+        pair_btn.clicked.connect(self._pick_pair)
+        rowp = QHBoxLayout()
+        rowp.addWidget(self.w['pair_file'])
+        rowp.addWidget(pair_btn)
+        rwp = QWidget()
+        rwp.setLayout(rowp)
+        f.addRow('Paired with', rwp)
 
-        f.addRow('time col', self._spin('col_time', 0, 0, 64))
-        f.addRow('force col', self._spin('col_force', 1, 0, 64))
-        f.addRow('accel start col', self._spin('col_accel_start', 2, 0, 64))
-        f.addRow('n inputs', self._spin('n_in', 1, 1, 64))
+        self.lbl_record = QLabel('— no record selected —')
+        self.lbl_record.setWordWrap(True)
+        self.lbl_record.setStyleSheet('color: #666;')
+        f.addRow('Layout', self.lbl_record)
+
+        self.tbl = QTableWidget(0, 4)
+        self.tbl.setHorizontalHeaderLabels(['From', 'Channel', 'Units', 'Role'])
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setMinimumHeight(150)
+        hh = self.tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        f.addRow(self.tbl)
+
+        f.addRow('fs (0 = from time col)', self._text('fs', '0'))
+        f.addRow('decimate (1 = none)', self._spin('decimate', 1, 1, 200))
         root.addWidget(g)
+
+        # ---------- analysis window ----------
+        g = QGroupBox('Analysis window')
+        f = QFormLayout(g)
+        self.w['signal_type'] = QComboBox()
+        self.w['signal_type'].addItems(['Auto', 'Transient', 'Random'])
+        f.addRow('signal type', self.w['signal_type'])
+        f.addRow('t start (s)', self._text('t_start', ''))
+        f.addRow('t end (s)', self._text('t_end', ''))
+
+        btn_full = QPushButton('Full record')
+        btn_full.clicked.connect(self.window_full)
+        btn_sugg = QPushButton('Suggest')
+        btn_sugg.setToolTip('A window to suit the detected signal type — for '
+                            'a transient, the impact and its ringdown')
+        btn_sugg.clicked.connect(self.suggest_requested.emit)
+        roww = QHBoxLayout()
+        roww.addWidget(btn_full)
+        roww.addWidget(btn_sugg)
+        rww = QWidget()
+        rww.setLayout(roww)
+        f.addRow('', rww)
+
+        self.lbl_cost = QLabel('—')
+        self.lbl_cost.setWordWrap(True)
+        f.addRow('Sweep size', self.lbl_cost)
+        root.addWidget(g)
+
+        for key in ('t_start', 't_end'):
+            self.w[key].editingFinished.connect(self.window_changed.emit)
+        self.w['fs'].editingFinished.connect(self._refresh_cost)
+        self.w['decimate'].valueChanged.connect(self._refresh_cost)
+        root.addWidget(self._output_group())
 
         # ---------- CVA ----------
         g = QGroupBox('CVA')
@@ -351,7 +422,6 @@ class ParamPanel(QScrollArea):
         f.addRow('neighbors', self._spin('neighbors', 1000, 10, 100000))
         f.addRow('ranklock (0=auto)', self._spin('ranklock', 0, 0, 512))
         f.addRow('eval stride', self._spin('eval_stride', 1, 1, 10000))
-        f.addRow('fs (Hz)', self._text('fs', '5000'))
         f.addRow('n_jobs (-1=all)', self._spin('n_jobs', 1, -1, 64))
         f.addRow('freq min (Hz)', self._text('freq_min', '0'))
         f.addRow('freq max (0=Nyq)', self._text('freq_max', '0'))
@@ -396,6 +466,7 @@ class ParamPanel(QScrollArea):
         g = QGroupBox('Plots')
         f = QVBoxLayout(g)
         for key, label in (
+                ('plot_time_history',   'Time history (drag to set the window)'),
                 ('plot_psd',            'Spectral density (excitation + response)'),
                 ('plot_significance',   'Eigenvalue significance'),
                 ('plot_freq_deviation', 'Frequency deviation'),
@@ -409,6 +480,8 @@ class ParamPanel(QScrollArea):
             f.addWidget(cb)
 
         pf = QFormLayout()
+        pf.addRow('history input ch', self._spin('th_in_ch', 0, 0, 256))
+        pf.addRow('history responses', self._spin('th_max_out', 3, 1, 32))
         pf.addRow('PSD nperseg (0=auto)', self._spin('psd_nperseg', 0, 0, 65536))
         pf.addRow('PSD f max (0=Nyq)', self._text('psd_fmax', '0'))
         pf.addRow('z threshold', self._text('z_threshold', '0.98'))
@@ -422,6 +495,11 @@ class ParamPanel(QScrollArea):
         holder.setLayout(pf)
         f.addWidget(holder)
         root.addWidget(g)
+
+        # Wired here rather than at creation: the CVA group, which owns
+        # lags and the stride, is built after the record group.
+        for key in ('lags', 'eval_stride', 'neighbors'):
+            self.w[key].valueChanged.connect(self._refresh_cost)
 
         root.addStretch(1)
 
@@ -446,6 +524,8 @@ class ParamPanel(QScrollArea):
             'Text data (*.txt *.dat *.csv);;All files (*)')
         if fn:
             self.w['data_file'].setText(fn)
+            self.w['pair_file'].setText('')
+            self._sniff(fn)
             self.data_chosen.emit(fn)
 
     def _pick_results(self):
@@ -453,6 +533,250 @@ class ParamPanel(QScrollArea):
             self, 'Results root', self.w['results_root'].text())
         if d:
             self.w['results_root'].setText(d)
+
+    def _output_group(self):
+        g = QGroupBox('Output')
+        f = QFormLayout(g)
+        self.w['results_root'] = QLineEdit(str(DEFAULT_RESULTS_ROOT))
+        pick_out = QPushButton('…')
+        pick_out.setFixedWidth(30)
+        pick_out.clicked.connect(self._pick_results)
+        row = QHBoxLayout()
+        row.addWidget(self.w['results_root'])
+        row.addWidget(pick_out)
+        rw = QWidget()
+        rw.setLayout(row)
+        f.addRow('Results root', rw)
+        return g
+
+    def _pick_pair(self):
+        start = self.w['data_file'].text() or str(Path.home())
+        fn, _ = QFileDialog.getOpenFileName(
+            self, 'Select the matching response file', start,
+            'Data (*.txt *.dat *.csv);;All files (*)')
+        if fn:
+            self.w['pair_file'].setText(fn)
+            self._sniff(self.w['data_file'].text(), keep_pair=True)
+
+    # ---------- record inspection ----------
+    def _role_infos(self):
+        """(excitation file, response file) — the second is None when one
+        file holds every channel."""
+        if self._info is None:
+            return None, None
+        if self._pair_info is None:
+            return self._info, None
+        if self._info.kind == 'response':
+            return self._pair_info, self._info
+        return self._info, self._pair_info
+
+    def _sniff(self, path, keep_pair=False):
+        """Describe the chosen record and fill the channel table from it."""
+        try:
+            self._info = sniff_record(path)
+        except Exception as exc:
+            self._info = self._pair_info = None
+            self.tbl.setRowCount(0)
+            self.lbl_record.setText(f'Could not read this file — {exc}')
+            self.lbl_cost.setText('—')
+            return
+
+        pair = None
+        if keep_pair and self.w['pair_file'].text().strip():
+            pair = Path(self.w['pair_file'].text().strip())
+        elif self._info.pair is not None:
+            pair = self._info.pair
+        self._pair_info = None
+        if pair is not None and Path(pair) != Path(self._info.path):
+            try:
+                self._pair_info = sniff_record(pair)
+            except Exception:
+                self._pair_info = None
+        self.w['pair_file'].setText(
+            str(self._pair_info.path) if self._pair_info else '')
+
+        spec = default_spec(self._info, pair_info=self._pair_info)
+        self._fill_table(spec)
+
+        # A record that carries its own time column sets the rate; the fs
+        # field stays at 0 so the time column is believed rather than
+        # overridden by whatever was left in the box.
+        if self._info.time_col is not None:
+            self.w['fs'].setText('0')
+        elif not self._num_or_none('fs'):
+            self.w['fs'].setText('')
+
+        in_info, out_info = self._role_infos()
+        txt = in_info.describe()
+        if out_info is not None:
+            txt += f'\nresponses: {out_info.path.name} — {out_info.describe()}'
+        if in_info.time_col is None:
+            txt += '\nNo time column — enter a sample rate below.'
+        self.lbl_record.setText(txt)
+        self.window_full()
+
+    def _fill_table(self, spec):
+        in_info, out_info = self._role_infos()
+        rows = []
+        if out_info is None:
+            for c in range(in_info.n_col):
+                role = ('Time' if c == spec.time_col else
+                        'Excitation' if c in spec.in_cols else
+                        'Response' if c in spec.out_cols else 'Ignore')
+                rows.append(('', c, in_info, role))
+        else:
+            for c in range(in_info.n_col):
+                rows.append(('in', c, in_info,
+                             'Excitation' if c in spec.in_cols else 'Ignore'))
+            for c in range(out_info.n_col):
+                rows.append(('out', c, out_info,
+                             'Response' if c in spec.out_cols else 'Ignore'))
+
+        self.tbl.setRowCount(len(rows))
+        for r, (src, c, info, role) in enumerate(rows):
+            for col, text in ((0, src or '—'),
+                              (1, info.channel_names()[c]),
+                              (2, info.channel_units()[c])):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.tbl.setItem(r, col, item)
+            combo = QComboBox()
+            combo.addItems(ROLES)
+            combo.setCurrentText(role)
+            combo.setProperty('src', src)
+            combo.setProperty('col', c)
+            combo.currentTextChanged.connect(self._refresh_cost)
+            self.tbl.setCellWidget(r, 3, combo)
+        self._refresh_cost()
+
+    # ---------- window ----------
+    def _num_or_none(self, key):
+        raw = self.w[key].text().strip()
+        if raw == '':
+            return None
+        try:
+            v = float(raw)
+        except ValueError:
+            return None
+        return v or None
+
+    def needs_fs(self):
+        """True when the record cannot be read until a rate is entered."""
+        if self._info is None:
+            return False
+        in_info, _ = self._role_infos()
+        if in_info is None or in_info.time_col is not None:
+            return False
+        return not self._num_or_none('fs')
+
+    def window_full(self):
+        self.w['t_start'].setText('')
+        self.w['t_end'].setText('')
+        self._refresh_cost()
+        self.window_changed.emit()
+
+    def set_window(self, t0, t1):
+        self.w['t_start'].setText(f'{t0:.5f}')
+        self.w['t_end'].setText(f'{t1:.5f}')
+        self._refresh_cost()
+        self.window_changed.emit()
+
+    def _effective_fs(self):
+        fs = self._num_or_none('fs')
+        if fs:
+            return fs
+        in_info, _ = self._role_infos()
+        return in_info.fs if in_info else None
+
+    def _refresh_cost(self, *_):
+        """How big a sweep the current record, decimation and window imply."""
+        if self._info is None or 'lags' not in self.w:
+            return
+        in_info, out_info = self._role_infos()
+        base = out_info or in_info
+        dec = max(1, self.w['decimate'].value())
+        fs = self._effective_fs()
+        fs_eff = fs / dec if fs else None
+        n = max(0, base.n_samp // dec)
+
+        n_sel = n
+        if fs_eff:
+            t0 = in_info.t0 if in_info.time_col is not None else 0.0
+            lo = self._num_or_none('t_start')
+            hi = self._num_or_none('t_end')
+            lo = t0 if lo is None else lo
+            hi = (t0 + n / fs_eff) if hi is None else hi
+            n_sel = min(n, max(0, int(round((hi - lo) * fs_eff))))
+
+        lags = self.w['lags'].value()
+        stride = max(1, self.w['eval_stride'].value())
+        n_win = max(0, -(-(n_sel - lags) // stride)) if n_sel > lags else 0
+
+        txt = f'{n_sel} samples'
+        if fs_eff:
+            txt += f'  ({n_sel / fs_eff:.3f} s at {fs_eff:.1f} Hz)'
+        txt += f'  ->  {n_win} CVA windows'
+        if n_sel <= self.w['neighbors'].value() + lags:
+            txt += (f'\n⚠ too short — the sweep needs more than '
+                    f'neighbors + lags = {self.w["neighbors"].value() + lags} '
+                    f'samples')
+        elif n_win > 20000:
+            txt += '\n⚠ a sweep this long runs for hours — decimate, ' \
+                   'shorten the window, or raise the eval stride'
+        self.lbl_cost.setText(txt)
+
+    # ---------- spec ----------
+    def record_spec(self) -> RecordSpec:
+        """Turn the panel's state into a RecordSpec for cva_record."""
+        path = Path(self.w['data_file'].text().strip())
+        if self._info is None or Path(self._info.path) != path:
+            self._sniff(str(path), keep_pair=True)
+        if self._info is None:
+            raise ValueError(f'Could not read {path.name}.')
+
+        in_info, out_info = self._role_infos()
+        time_col, in_cols, out_cols = None, [], []
+        for r in range(self.tbl.rowCount()):
+            combo = self.tbl.cellWidget(r, 3)
+            src, col = combo.property('src'), int(combo.property('col'))
+            role = combo.currentText()
+            if role == 'Time':
+                if src == 'out':
+                    raise ValueError(
+                        'The time column must come from the excitation file.')
+                time_col = col
+            elif role == 'Excitation':
+                if src == 'out':
+                    raise ValueError(
+                        f'{out_info.path.name} holds the responses, so its '
+                        f'columns cannot be the excitation. Swap the two '
+                        f'files if they are the wrong way round.')
+                in_cols.append(col)
+            elif role == 'Response':
+                if out_info is not None and src != 'out':
+                    raise ValueError(
+                        f'{in_info.path.name} holds the excitation, so its '
+                        f'columns cannot be responses.')
+                out_cols.append(col)
+
+        if not in_cols:
+            raise ValueError('No channel is marked as the excitation.')
+        if not out_cols:
+            raise ValueError('No channel is marked as a response.')
+        if time_col is None and not self._num_or_none('fs'):
+            raise ValueError(
+                f'{Path(in_info.path).name} has no time column, so it needs a '
+                f'sample rate — type one into the fs box and press Enter.')
+
+        return RecordSpec(
+            input_path=Path(in_info.path),
+            response_path=Path(out_info.path) if out_info else None,
+            time_col=time_col,
+            in_cols=in_cols, out_cols=out_cols,
+            fs=self._num_or_none('fs'),
+            decimate=max(1, self.w['decimate'].value()),
+            t_start=self._num_or_none('t_start'),
+            t_end=self._num_or_none('t_end'))
 
     # ---------- collect ----------
     def values(self):
@@ -468,6 +792,8 @@ class ParamPanel(QScrollArea):
                 p[key] = widget.value()
             elif isinstance(widget, QCheckBox):
                 p[key] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                p[key] = widget.currentText()
             else:
                 p[key] = widget.text().strip()
 
@@ -482,6 +808,10 @@ class ParamPanel(QScrollArea):
             raise ValueError('No data file selected.')
         if not Path(p['data_file']).exists():
             raise ValueError(f'Data file not found:\n{p["data_file"]}')
+
+        p['t_start'] = self._num_or_none('t_start')
+        p['t_end'] = self._num_or_none('t_end')
+        p['spec'] = self.record_spec()
 
         stem = Path(p['data_file']).stem
         run_dir = Path(p['results_root']) / stem
@@ -510,16 +840,25 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.worker = None
         self._figs = []
-        self._raw = None          # (cache key, parsed array) for the loaded file
+        self._fail_title = 'Pipeline failed'   # retitled per operation
+        self._cache = {}          # {path string: parsed array}
+        self._stamps = {}         # {path string: (mtime, size)} for the above
+        self._spans = []          # drag-to-select handles on the time history
 
         self.params = ParamPanel()
         self.params.setMinimumWidth(330)
         self.params.setMaximumWidth(430)
-        self.params.data_chosen.connect(self.load_preview)
+        self.params.data_chosen.connect(self._on_data_chosen)
+        self.params.suggest_requested.connect(self.on_suggest)
+        # Typing a rate is the one thing standing between a no-time-column
+        # record and being read, so Enter there just loads it.
+        self.params.w['fs'].returnPressed.connect(self.load_preview)
+        self.params.window_changed.connect(self.refresh_window_view)
 
-        self.btn_preview = QPushButton('Load + PSD')
+        self.btn_preview = QPushButton('Load record')
         self.btn_preview.setToolTip(
-            'Read the record and plot excitation / response spectral density')
+            'Read the whole record and plot its time history and spectral '
+            'density, so the analysis window can be chosen from them')
         self.btn_preview.clicked.connect(self.load_preview)
         self.btn_run = QPushButton('Run Pipeline')
         self.btn_run.setDefault(True)
@@ -547,8 +886,9 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(False)
         self.tabs.setDocumentMode(True)
         placeholder = QLabel(
-            'Select a data file — its spectral density appears here.\n\n'
-            'Then press Run Pipeline. Figures appear as tabs, one each.')
+            'Select a record — its time history and spectral density appear '
+            'here.\n\nDrag across the time history to set the analysis '
+            'window, or press Suggest.\nThen press Run Pipeline.')
         placeholder.setAlignment(Qt.AlignCenter)
         self.tabs.addTab(placeholder, 'Figures')
 
@@ -601,7 +941,7 @@ class MainWindow(QMainWindow):
         m.addAction(a)
 
         m = self.menuBar().addMenu('&Run')
-        a = QAction('Load Record + Spectral Density', self)
+        a = QAction('Load Record + Plots', self)
         a.triggered.connect(self.load_preview)
         m.addAction(a)
         a = QAction('Run Pipeline', self)
@@ -649,6 +989,26 @@ class MainWindow(QMainWindow):
             self.progress.setRange(0, 100)
 
     # ------------------------------------------------------------------
+    @Slot(str)
+    def _on_data_chosen(self, path):
+        """
+        Load the record the moment it is picked — unless it cannot be read
+        yet.
+
+        A record with no time column needs a sample rate, and firing the
+        load anyway threw a modal failure dialog over the very panel the
+        rate has to be typed into.
+        """
+        if self.params.needs_fs():
+            msg = (f'{Path(path).name} has no time column — type a sample '
+                   f'rate into fs and press Enter.')
+            self.statusBar().showMessage(msg)
+            self.append_log(f'--- {msg} ---')
+            self.params.w['fs'].setFocus()
+            self.params.w['fs'].selectAll()
+            return
+        self.load_preview()
+
     def load_preview(self, *_):
         """Parse the selected record and plot its spectral densities."""
         if self.thread is not None:
@@ -659,6 +1019,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Check parameters', str(e))
             return
 
+        self._fail_title = 'Could not read the record'
         self.logpane.clear()
         self.append_log(f'--- Loading {Path(p["data_file"]).name} ---')
         self.btn_run.setEnabled(False)
@@ -667,7 +1028,7 @@ class MainWindow(QMainWindow):
         self._busy(True, 'Reading record …')
 
         self.thread = QThread(self)
-        self.worker = PreviewWorker(p)
+        self.worker = PreviewWorker(p, cache=self._cached_arrays())
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.execute)
         self.worker.done.connect(self.on_preview_done)
@@ -677,10 +1038,10 @@ class MainWindow(QMainWindow):
         self.thread.start()
 
     @Slot(object, object)
-    def on_preview_done(self, run, raw):
+    def on_preview_done(self, run, cache):
         self._busy(False)
         self._teardown_thread()
-        self._raw = (self._cache_key(run.data_file), raw)
+        self._remember(cache)
         # A new record invalidates anything held from the previous one.
         self.run_obj, self.clust_obj, self.ms_obj = run, None, None
         self.btn_plots.setEnabled(True)
@@ -693,20 +1054,22 @@ class MainWindow(QMainWindow):
             f'fs={run.fs:.1f} Hz, {len(run.time)} samples')
 
     @staticmethod
-    def _cache_key(path):
-        p = Path(path)
+    def _stamp(path):
         try:
-            st = p.stat()
-            return (str(p.resolve()), st.st_mtime_ns, st.st_size)
+            st = Path(path).stat()
+            return (st.st_mtime_ns, st.st_size)
         except OSError:
-            return (str(p), 0, 0)
+            return (0, 0)
 
-    def _cached_raw(self, path):
-        """The parsed record, if the preview read this exact file."""
-        if self._raw is None:
-            return None
-        key, raw = self._raw
-        return raw if key == self._cache_key(path) else None
+    def _remember(self, cache):
+        """Keep the arrays the preview read, with a stamp of each file."""
+        self._cache = dict(cache or {})
+        self._stamps = {k: self._stamp(k) for k in self._cache}
+
+    def _cached_arrays(self):
+        """The remembered arrays, minus any whose file changed on disk."""
+        return {k: v for k, v in self._cache.items()
+                if self._stamps.get(k) == self._stamp(k)}
 
     # ------------------------------------------------------------------
     def start_pipeline(self):
@@ -718,6 +1081,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Check parameters', str(e))
             return
 
+        self._fail_title = 'Pipeline failed'
         p['run_dir'].mkdir(parents=True, exist_ok=True)
         p['fig_dir'].mkdir(parents=True, exist_ok=True)
 
@@ -743,7 +1107,7 @@ class MainWindow(QMainWindow):
 
         self.thread = QThread(self)
         self.worker = PipelineWorker(
-            p, existing=existing, raw=self._cached_raw(p['data_file']))
+            p, existing=existing, cache=self._cached_arrays())
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.execute)
         self.worker.done.connect(self.on_done)
@@ -793,8 +1157,9 @@ class MainWindow(QMainWindow):
         self._teardown_thread()
         self.progress.setValue(0)
         self.statusBar().showMessage('Failed')
-        self.append_log('\n*** PIPELINE FAILED ***\n' + tb)
-        QMessageBox.critical(self, 'Pipeline failed', tb.strip().splitlines()[-1])
+        title = getattr(self, '_fail_title', 'Pipeline failed')
+        self.append_log(f'\n*** {title.upper()} ***\n' + tb)
+        QMessageBox.critical(self, title, tb.strip().splitlines()[-1])
 
     # ------------------------------------------------------------------
     def build_figures(self):
@@ -817,7 +1182,13 @@ class MainWindow(QMainWindow):
             run, clust, ms = self.run_obj, self.clust_obj, self.ms_obj
             has_cva = bool(run.windows)
             jobs = []
+            th_fig = None
 
+            window = self._window_from(p, run)
+            if p['plot_time_history'] and run.datout is not None:
+                jobs.append(('Time history', lambda: run.plot_time_history(
+                    in_ch=p['th_in_ch'], max_out=p['th_max_out'],
+                    window=window, dpi=p['dpi'])))
             if p['plot_psd'] and run.datout is not None:
                 jobs.append(('Spectral density',
                              lambda: run.plot_spectral_density(
@@ -867,7 +1238,11 @@ class MainWindow(QMainWindow):
                     name = title if len(figs) == 1 else f'{title} {i}'
                     self._figs.append(fig)
                     self.tabs.addTab(FigureTab(fig), name)
+                    if title == 'Time history':
+                        th_fig = fig
                 QApplication.processEvents()
+
+            self._attach_spans(th_fig)
 
             if self.tabs.count() == 0:
                 lbl = QLabel('No figures — enable some in the Plots group.')
@@ -877,6 +1252,93 @@ class MainWindow(QMainWindow):
                 f'{len(self._figs)} figures')
         finally:
             QApplication.restoreOverrideCursor()
+
+    # ------------------------------------------------------------------
+    # analysis window
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _window_from(p, run):
+        """(t_start, t_end) to shade, filling blanks from the record."""
+        if p['t_start'] is None and p['t_end'] is None:
+            return None
+        lo = float(run.time[0]) if p['t_start'] is None else p['t_start']
+        hi = float(run.time[-1]) if p['t_end'] is None else p['t_end']
+        return (lo, hi)
+
+    def _attach_spans(self, fig):
+        """Let the window be dragged out on any panel of the time history."""
+        self._spans = []
+        if fig is None:
+            return
+
+        def on_select(lo, hi):
+            if hi > lo:
+                self.params.set_window(lo, hi)
+
+        for ax in fig.axes:
+            self._spans.append(SpanSelector(
+                ax, on_select, 'horizontal', useblit=False,
+                props=dict(alpha=0.25, facecolor='seagreen'),
+                drag_from_anywhere=True))
+
+    @Slot()
+    def on_suggest(self):
+        if self.run_obj is None or self.run_obj.datout is None:
+            QMessageBox.information(
+                self, 'Load a record first',
+                'Press Load record first — Suggest needs to see the '
+                'signals before it can pick a window.')
+            return
+        kind = self.params.w['signal_type'].currentText().lower()
+        # Keep the suggestion to a sweep worth starting. A stationary record
+        # would otherwise be offered whole, which on a 20 s 10 kHz record is
+        # 200 000 windows.
+        lags = self.params.w['lags'].value()
+        stride = max(1, self.params.w['eval_stride'].value())
+        budget = SUGGEST_MAX_WINDOWS * stride + lags
+        t0, t1 = cva_record.suggest_window(
+            self.run_obj.time, self.run_obj.inputd, self.run_obj.datout,
+            kind=None if kind == 'auto' else kind, max_samples=budget)
+        st = cva_record.classify(self.run_obj.inputd, self.run_obj.datout)
+        n_sel = int(((self.run_obj.time >= t0)
+                     & (self.run_obj.time <= t1)).sum())
+        note = (f'  (capped at {SUGGEST_MAX_WINDOWS} windows)'
+                if n_sel >= budget else '')
+        self.append_log(f'Suggested window {t0:.5f} .. {t1:.5f} s   '
+                        f'({st}){note}')
+        self.params.set_window(t0, t1)
+
+    @Slot()
+    def refresh_window_view(self):
+        """Redraw just the time history after the window changed."""
+        if self.run_obj is None or self.run_obj.datout is None:
+            return
+        idx = next((i for i in range(self.tabs.count())
+                    if self.tabs.tabText(i) == 'Time history'), None)
+        if idx is None:
+            return
+        try:
+            p = self.params.values()
+        except ValueError:
+            return
+        old_tab = self.tabs.widget(idx)
+        try:
+            fig = self.run_obj.plot_time_history(
+                in_ch=p['th_in_ch'], max_out=p['th_max_out'],
+                window=self._window_from(p, self.run_obj), dpi=p['dpi'])
+        except Exception:
+            self.append_log('[plot] Time history failed:\n'
+                            + traceback.format_exc())
+            return
+        if getattr(old_tab, 'fig', None) is not None:
+            if old_tab.fig in self._figs:
+                self._figs.remove(old_tab.fig)
+            plt.close(old_tab.fig)
+        self._figs.append(fig)
+        self.tabs.removeTab(idx)
+        self.tabs.insertTab(idx, FigureTab(fig), 'Time history')
+        self.tabs.setCurrentIndex(idx)
+        self._attach_spans(fig)
 
     # ------------------------------------------------------------------
     def save_figures(self):

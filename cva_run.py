@@ -19,6 +19,7 @@ Date:   2026-04-16
 """
 
 from __future__ import annotations
+import json
 import threading
 import time
 import warnings
@@ -31,6 +32,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import welch
 from sklearn.neighbors import NearestNeighbors
+
+import cva_record
+from cva_record import RecordSpec, default_spec, sniff_record
 
 from cva_core import cvaonestep, delaybuild, reset_cva_state
 from cva_plotting import show_if_enabled
@@ -54,6 +58,30 @@ class CVAConfig:
     sig_peak_mindist:       int   = 3     # minimum peak separation in histogram bins
                                           # bin width = (freq_max-freq_min)/200 Hz
                                           # increase to merge spurious nearby peaks
+
+
+# =============================================================================
+# level-of-detail helper
+# =============================================================================
+
+def _lod(t, x, max_points):
+    """
+    Reduce a long trace to about max_points plotted columns.
+
+    Returns (t_blocks, mean, min, max) so the caller can draw a min/max band
+    with the mean through it; min and max come back None when the trace is
+    already short enough to plot sample for sample. Plain striding would
+    drop the single-sample peak of an impact, which is exactly the feature
+    being looked for.
+    """
+    n = len(t)
+    if n <= max_points * 2:
+        return t, x, None, None
+    blk = int(np.ceil(n / max_points))
+    m = n // blk * blk
+    tb = t[:m].reshape(-1, blk)[:, 0]
+    xb = x[:m].reshape(-1, blk)
+    return tb, xb.mean(axis=1), xb.min(axis=1), xb.max(axis=1)
 
 
 # =============================================================================
@@ -88,6 +116,10 @@ class CVARun:
         self.fs:      Optional[float]      = None
         self.n_out:   int = 0
         self.n_in:    int = 0
+        self.spec:    Optional[RecordSpec] = None
+        self.meta:    dict = {}          # how the signals were assembled
+        self.in_names:  List[str] = []
+        self.out_names: List[str] = []
         self.past_db:   Optional[np.ndarray] = None
         self.future_db: Optional[np.ndarray] = None
         self.n_win:     int = 0
@@ -97,38 +129,67 @@ class CVARun:
     # ------------------------------------------------------------------
     # load_data
     # ------------------------------------------------------------------
-    def load_data(self, filepath, col_time=0, col_force=1,
-                  col_accel_start=2, n_in=1, raw=None):
+    def load_record(self, spec: RecordSpec, cache: dict = None):
         """
-        Read a whitespace/comma delimited record and split it into
-        time / input / output arrays.
+        Load the signals described by a RecordSpec.
+
+        This is the general entry point: it handles a combined file with or
+        without a time column, and the separate '<base>in.dat' /
+        '<base>out.dat' pairs, along with decimation and the analysis time
+        window. See cva_record for what a spec holds.
+
+        cache : optional {path string: array} of files already read.
+        """
+        time, inputd, datout, meta = cva_record.load_signals(spec, cache=cache)
+        self.spec, self.meta = spec, meta
+        self.data_file = Path(spec.input_path)
+        self.time, self.inputd, self.datout = time, inputd, datout
+        self.n_in  = self.inputd.shape[1]
+        self.n_out = self.datout.shape[1]
+        self.in_names  = meta['in_names']
+        self.out_names = meta['out_names']
+        self.fs = meta['fs']
+        if self.cfg.freq_max == 0.0:
+            self.cfg.freq_max = self.fs / 2.0
+        N = len(self.time)
+        print(f'  Samples : {N}  ({N/self.fs:.2f} s)')
+        print(f'  Outputs : {self.n_out}   Inputs : {self.n_in}')
+        print(f'  Fs      : {self.fs:.1f} Hz')
+        return self
+
+    # ------------------------------------------------------------------
+    # load_data
+    # ------------------------------------------------------------------
+    def load_data(self, filepath, col_time=0, col_force=1,
+                  col_accel_start=2, n_in=1, raw=None,
+                  t_start=None, t_end=None, decimate=1):
+        """
+        Read one combined record laid out as [time, input(s), responses].
+
+        Kept for callers that describe the file by column index. The header
+        rows and delimiter are detected, so this now opens the PicoScope
+        exports as well as the plain numeric records. For separate
+        input/output files, or a record with no time column, build a
+        RecordSpec and call load_record().
 
         raw : optional (N, n_col) array already read from the file. Lets a
               caller that has parsed the file once (e.g. the GUI's PSD
-              preview) re-slice it without a second np.loadtxt.
+              preview) re-slice it without a second read.
         """
         p = Path(filepath)
         if not p.exists():
             raise FileNotFoundError(f'Not found: {p}')
-        self.data_file = p
-        if raw is None:
-            print(f'Loading: {p}')
-            raw = np.loadtxt(str(p))
-        else:
-            raw = np.asarray(raw)     # caller has already announced the read
-        self.time   = raw[:, col_time]
-        self.inputd = raw[:, col_force:col_force+n_in]
-        self.datout = raw[:, col_accel_start:]
-        N = len(self.time)
-        self.n_out = self.datout.shape[1]
-        self.n_in  = self.inputd.shape[1]
-        self.fs = (self.cfg.fs if self.cfg.fs
-                   else 1.0 / np.median(np.diff(self.time)))
-        if self.cfg.freq_max == 0.0:
-            self.cfg.freq_max = self.fs / 2.0
-        print(f'  Samples : {N}  ({N/self.fs:.2f} s)')
-        print(f'  Outputs : {self.n_out}   Inputs : {self.n_in}')
-        print(f'  Fs      : {self.fs:.1f} Hz')
+        info = sniff_record(p)
+        n_col = info.n_col if raw is None else int(np.asarray(raw).shape[1])
+        spec = RecordSpec(
+            input_path=p,
+            time_col=col_time,
+            in_cols=list(range(col_force, col_force + n_in)),
+            out_cols=list(range(col_accel_start, n_col)),
+            fs=self.cfg.fs,
+            decimate=decimate, t_start=t_start, t_end=t_end)
+        cache = {str(p): np.asarray(raw)} if raw is not None else None
+        return self.load_record(spec, cache=cache)
 
     # ------------------------------------------------------------------
     # plot_spectral_density
@@ -231,6 +292,121 @@ class CVARun:
                 a.axvline(min(hi, f[-1]), color='k', ls=':', lw=0.8)
 
         axes[0].set_xlim(f[0], f[-1])
+        if save_path:
+            fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
+            print(f'  Saved: {Path(save_path).name}')
+        show_if_enabled()
+        return fig
+
+    # ------------------------------------------------------------------
+    # plot_time_history
+    # ------------------------------------------------------------------
+    def plot_time_history(self, in_ch=0, out_ch=None, max_out=3,
+                          window=None, max_points=3000,
+                          save_path=None, dpi=150):
+        """
+        Excitation and response time histories, for choosing a window.
+
+        Needs load_data()/load_record() only. Plots one excitation channel
+        and a few responses rather than all of them — a 9-channel record at
+        150 000 samples is unreadable drawn in full, and the point here is
+        to see where the useful part of the record is.
+
+        Long records are drawn at reduced resolution as a min/max band with
+        the block mean through it, so a transient peak between two plotted
+        samples still shows up instead of being skipped.
+
+        Parameters
+        ----------
+        in_ch      : which excitation channel to show.
+        out_ch     : response channels to show; None = the first max_out.
+        max_out    : cap on response panels when out_ch is None.
+        window     : (t_start, t_end) in seconds to shade as the proposed
+                     analysis window. None = shade nothing.
+        max_points : target number of plotted points per panel.
+
+        Returns the Figure.
+        """
+        if self.datout is None:
+            raise RuntimeError('Call load_data() or load_record() first')
+
+        if out_ch is None:
+            out_ch = list(range(min(max_out, self.n_out)))
+        out_ch = [c for c in np.atleast_1d(out_ch).tolist()
+                  if 0 <= c < self.n_out]
+        in_ch = int(np.clip(in_ch, 0, self.n_in - 1))
+
+        t = np.asarray(self.time, dtype=float)
+        st = cva_record.classify(self.inputd, self.datout)
+
+        def label(kind, idx):
+            names = self.in_names if kind == 'in' else self.out_names
+            units = self.meta.get(f'{kind}_units', []) if self.meta else []
+            name = (names[idx] if idx < len(names)
+                    else f'{"Input" if kind == "in" else "Response"} {idx}')
+            unit = units[idx] if idx < len(units) else ''
+            return f'{name} {unit}'.strip()
+
+        rows = 1 + len(out_ch)
+        fig, axes = plt.subplots(rows, 1, figsize=(12, 2.2 * rows + 1.2),
+                                 sharex=True, layout='constrained')
+        axes = np.atleast_1d(axes)
+
+        src = Path(self.meta.get('input_path', str(self.data_file or ''))).name
+        if self.meta.get('response_path'):
+            src += ' + ' + Path(self.meta['response_path']).name
+        extra = ''
+        if self.meta.get('decimate', 1) > 1:
+            extra += f'   decimated {self.meta["decimate"]}x'
+        if self.meta.get('align_decimate', 1) > 1:
+            extra += f'   input aligned {self.meta["align_decimate"]}x'
+        # Three short lines rather than one long one: the single-line form
+        # ran off both ends of the figure for a paired record.
+        fig.suptitle(
+            f'Time History — {src}\n'
+            f'fs={self.fs:.1f} Hz   {len(t)} samples '
+            f'({t[0]:.4f}-{t[-1]:.4f} s){extra}\n'
+            f'{st}',
+            fontsize=10, fontweight='bold')
+
+        panels = [(axes[0], self.inputd[:, in_ch], label('in', in_ch),
+                   'darkorange')]
+        for ax, c in zip(axes[1:], out_ch):
+            panels.append((ax, self.datout[:, c], label('out', c),
+                           'steelblue'))
+
+        for ax, y, lab, colour in panels:
+            tb, mean, lo, hi = _lod(t, np.asarray(y, dtype=float), max_points)
+            if lo is not None:
+                ax.fill_between(tb, lo, hi, color=colour, alpha=0.45,
+                                linewidth=0)
+                ax.plot(tb, mean, color=colour, lw=0.6)
+            else:
+                ax.plot(tb, mean, color=colour, lw=0.7)
+            ax.set_ylabel(lab, fontsize=9)
+            ax.grid(True, alpha=0.3)
+            ax.axhline(0.0, color='k', lw=0.5, alpha=0.4)
+
+        if window is not None:
+            w0, w1 = float(window[0]), float(window[1])
+            for ax in axes:
+                ax.axvspan(w0, w1, color='seagreen', alpha=0.12, zorder=0)
+                ax.axvline(w0, color='seagreen', ls='--', lw=1.0)
+                ax.axvline(w1, color='seagreen', ls='--', lw=1.0)
+            n_sel = int(((t >= w0) & (t <= w1)).sum())
+            axes[0].set_title(
+                f'window {w0:.4f}-{w1:.4f} s   ->   {n_sel} samples '
+                f'({n_sel / self.fs:.3f} s)', fontsize=9)
+
+        axes[-1].set_xlabel('Time (s)')
+        axes[0].set_xlim(t[0], t[-1])
+        if len(t) > max_points * 2:
+            # Out of the axes, where it cannot sit on top of a trace.
+            fig.text(0.995, 0.004,
+                     f'drawn as min/max bands, '
+                     f'{int(np.ceil(len(t) / max_points))} samples/point',
+                     ha='right', va='bottom', fontsize=7, color='0.45')
+
         if save_path:
             fig.savefig(str(save_path), dpi=dpi, bbox_inches='tight')
             print(f'  Saved: {Path(save_path).name}')
@@ -354,7 +530,7 @@ class CVARun:
         # ----------------------------------------------------------
         # Serial path
         # ----------------------------------------------------------
-        if n_jobs == 1 or len(remaining) == 0:
+        if n_jobs in (0, 1) or len(remaining) == 0:   # 0 is meaningless to joblib
             for ki, kw in enumerate(remaining, start=1):
                 if _stop_requested():
                     raise InterruptedError(
@@ -1178,6 +1354,10 @@ class CVARun:
             g.attrs['sig_peak_mindist'] = self.cfg.sig_peak_mindist
             g.attrs['data_file']   = (str(self.data_file)
                                       if self.data_file else '')
+            # How the signals were assembled — which files, columns,
+            # decimation and time window. JSON keeps it one attribute
+            # whatever fields cva_record grows later.
+            g.attrs['record_meta'] = json.dumps(self.meta)
 
             g = f.create_group('data')
             g.create_dataset('time',   data=self.time,   compression='gzip')
@@ -1250,6 +1430,12 @@ class CVARun:
             run.datout = f['data/datout'][:]
             run.n_out  = run.datout.shape[1]
             run.n_in   = run.inputd.shape[1]
+            try:
+                run.meta = json.loads(ca.get('record_meta', '{}'))
+            except (ValueError, TypeError):
+                run.meta = {}
+            run.in_names  = run.meta.get('in_names', [])
+            run.out_names = run.meta.get('out_names', [])
             run.past_db   = f['database/past_db'][:]
             run.future_db = f['database/future_db'][:]
             run.n_win     = run.past_db.shape[0]

@@ -30,13 +30,29 @@ h5py 3.16.0, matplotlib 3.11.2, joblib 1.6.0, PySide6 6.11.3.
 conda activate cvapy && python cva_gui.py
 ```
 
-Picking a record (Browse …, or File ▸ Open Data Record) reads it straight away
-and plots the excitation and response spectral densities, so the drive band and
-the response can be checked before committing to the sweep. **Run Pipeline**
-then reuses that already-parsed array instead of reading the file twice. The
-status bar carries the live stage, window count and ETA; the progress bar runs
-0–55 % over the CVA sweep (serial *and* parallel), then 60 % clustering, 85 %
-mode shapes.
+Picking a record (Browse …, or File ▸ Open Data Record) inspects it at once —
+header rows, delimiter, channel names and units, whether there is a time column,
+and whether an `in`/`out` sibling exists on disk — and fills the **Record**
+panel from what it finds. Each column gets a role (Time / Excitation / Response
+/ Ignore) that can be changed; `fs` and `decimate` sit under the table.
+
+The record then loads in full and appears as two tabs: the **time history** and
+the **spectral density**. A record with no time column — the `in.dat`/`out.dat`
+pairs — cannot be read until you give it a rate, so it waits: type one into
+`fs` and press Enter. The analysis window is chosen from the time history —
+drag across any panel to set it, type `t start` / `t end` by hand, or press
+**Suggest**, which picks a window to suit the detected signal type: a transient
+gets its impact and ringdown, a stationary record gets as much as
+`SUGGEST_MAX_WINDOWS` (5000) windows will cover, since for a stationary record
+only the length matters and not where it starts. **Sweep
+size** keeps a running count of the samples and CVA windows the current
+settings imply, and warns when a sweep would run for hours or is too short to
+fit `neighbors + lags`.
+
+**Run Pipeline** applies the window and reuses the already-parsed arrays rather
+than reading the files again. The status bar carries the live stage, window
+count and ETA; the progress bar runs 0–55 % over the CVA sweep (serial *and*
+parallel), then 60 % clustering, 85 % mode shapes.
 
 **Stop** is checked once per window, so a sweep gives up within one window
 instead of at the end of the stage; partial results are discarded. Ctrl+C in
@@ -44,21 +60,56 @@ the launching terminal also quits. If the window is ever wedged beyond that,
 `pkill -f cva_gui.py`.
 
 **Script** — edit the settings block at the top of `run_cva_pipeline.py`
-(`PLOT_PSD` plots the same spectra right after the record is read), then:
+(`RESPONSE_FILE` for a paired record, `DECIMATE`, `T_START` / `T_END`, and
+`PLOT_TIME_HISTORY` / `PLOT_PSD` for the same two pre-sweep figures), then:
 
 ```bash
 conda activate cvapy && python run_cva_pipeline.py
 ```
 
-## Data format
+## Records
 
-Whitespace- or comma-delimited text:
+`cva_record.py` opens three shapes of record without being told which is which:
 
-| column | contents |
-|---|---|
-| `col_time` (default 0) | time (s) |
-| `col_force` (default 1) | force input — `n_in` columns wide |
-| `col_accel_start` (default 2) onward | accelerometer outputs |
+| shape | where | what it needs |
+|---|---|---|
+| combined, with a time column | PicoScope exports (`Time / Channel A …`, 3-line header), `*_cva.txt` | nothing — the rate comes from the time column |
+| combined, no time column | single-column drive waveforms | a sample rate |
+| **paired** `<base>in.dat` / `<base>out.dat` | `nldata`, `r6dof` | a sample rate; the sibling is found on disk |
+
+`sniff_record()` reads a probe of the file, never all of it, and reports the
+header depth, delimiter, channel names and units, column count, sample count,
+and whether column 0 is a uniformly sampled time vector (which also gives fs).
+A file written as one enormous row — `din.dat` is 100 001 columns on one line —
+is recognised as a single channel and transposed.
+
+Pairing covers the spellings in use: `in`/`out` at the end of the stem
+(`r6dofcubic2in`), `input`/`output` (`ainput2`), and `in`/`out` before a suffix
+(`icein38e`). Candidates are always checked against the disk, so a stem that
+merely contains `in` is never mistaken for a pair.
+
+Where a paired excitation is longer than its response — `mdofpulsein.dat` has
+200 000 samples against `mdofpulseout.dat`'s 10 001 — it was simulated at a
+finer time step, so it is decimated by the length ratio and both are trimmed to
+the shorter. This is the step `saveformatteddata.m` and `r6dofcvaformatter.py`
+did by hand; writing a `_cva.txt` intermediate is now optional rather than a
+precondition.
+
+**Sample rate.** `fs = 0` (or blank) means *take it from the time column*,
+which is what 200 of the 203 records here carry. A non-zero `fs` overrides the
+time column and logs a warning when the two disagree — worth reading, since a
+record read at the wrong rate reports every frequency wrong by that factor.
+
+**Decimation and window.** `decimate` is applied first, in stages for large
+ratios (20 becomes 5 then 4), using the same order-8 Chebyshev filter run
+forwards and backwards that MATLAB's `decimate` uses. `t_start` / `t_end` then
+cut the analysis window, keeping the record's own clock, so a window on a
+pre-triggered record is written in that record's negative-time terms.
+
+Most of these records need a window rather than wanting one: 10 s at 10 kHz is
+100 000 samples, which is ~100 000 CVA windows at `eval_stride = 1`, and 157 of
+200 records begin before the trigger, so their opening stretch holds no
+excitation at all.
 
 Sample record: `bltimedatashort.txt` (3001 samples, 17 outputs, 1 input, 3200 Hz).
 
@@ -86,6 +137,8 @@ set `RUN_CVA` / `RUN_CLUSTER` / `RUN_MODES` to `False`.
 | `tol` | SVD rank tolerance. 1e-3 loose, 1e-4 recommended, 5e-5 tight |
 | `neighbors` | nearest neighbours per local fit. 200 fast, 960 better conditioned |
 | `eval_stride` | evaluate every Nth window. 1 = every window |
+| `decimate` | 1 = none. Applied before the window; divides fs |
+| `t_start` / `t_end` | analysis window in seconds. None = the whole record |
 | `n_jobs` | 1 = serial, -1 = all cores (verified bit-identical to serial) |
 | `f_min` / `f_max` | frequency band for clustering and mode shapes |
 | `n_clusters` | 0 = auto-detect via elbow |
@@ -95,7 +148,16 @@ set `RUN_CVA` / `RUN_CLUSTER` / `RUN_MODES` to `False`.
 Every plot method builds a figure, optionally saves it, and **returns the
 `Figure`**. `plot_per_cluster` returns a list, one figure per cluster.
 
-`CVARun.plot_spectral_density()` needs `load_data()` only — no CVA results — so
+`CVARun.plot_time_history()` and `CVARun.plot_spectral_density()` need the
+record only — no CVA results — so it can be judged before the sweep.
+
+`plot_time_history()` draws one excitation channel and the first few responses
+(`max_out`, default 3) rather than all of them, and shades the proposed window.
+Long traces are drawn as min/max bands with the block mean through them, so the
+single-sample peak of an impact still shows instead of being strided over. In
+the GUI, dragging across any of its panels sets the window.
+
+`plot_spectral_density()` needs the record only too, so
 a record can be judged before the sweep. Three stacked panels: excitation PSD,
 response PSD with all channels overlaid, and response PSD per channel as a map.
 Welch segment length (`nperseg=0` picks it from the record) and the plotted

@@ -67,6 +67,7 @@ importlib.reload(cva_core)
 importlib.reload(cva_run)
 importlib.reload(cva_phi_cluster)
 importlib.reload(cva_mode_shapes)
+from cva_record import RecordSpec, default_spec, sniff_record
 from cva_run import CVAConfig, CVARun
 from cva_phi_cluster import CVAPhiCluster
 from cva_mode_shapes import CVAModeShapes
@@ -75,8 +76,21 @@ from cva_mode_shapes import CVAModeShapes
 # USER SETTINGS
 # =============================================================================
 
-#DATA_FILE = '/Users/nhunterjr/Waveforms 2/cvastructurehit1.txt'
-DATA_FILE= '/Users/nhunterjr/Waveforms 2/initial beam transient/square structure data/sstrdaa.txt'
+# Records live under ~/Waveforms/Waveforms 2 — the folder moved out of the
+# home root, so the old '/Users/nhunterjr/Waveforms 2/...' paths no longer
+# resolve. WAVEFORMS below keeps the rest of the path readable.
+WAVEFORMS = Path('/Users/nhunterjr/Waveforms/Waveforms 2')
+
+#DATA_FILE = WAVEFORMS / 'cvastructurehit1.txt'
+DATA_FILE = WAVEFORMS / 'initial beam transient/square structure data/sstrdaa.txt'
+
+# Set when the excitation and the responses are in separate files — the
+# '<base>in.dat' / '<base>out.dat' records under nldata and r6dof. None
+# means DATA_FILE holds every channel. With a pair, COL_* below are ignored:
+# column 0 of the input file is the excitation and every column of the
+# response file is a response.
+RESPONSE_FILE = None
+# e.g. RESPONSE_FILE = Path('.../r6dof/r6dofcubic2out.dat')
 # Save settings
 RESULTS_ROOT = Path('/Users/nhunterjr/Documents/DEVONthink/CVA_Results')
 SAVE_PLOTS   = True
@@ -90,8 +104,26 @@ TOL         = 1e-2
 NEIGHBORS   =1000
 RANKLOCK    = 0
 EVAL_STRIDE = 1
+# 0 = take the rate from the record's own time column, which is what most
+# records carry. A non-zero value OVERRIDES the time column and is reported
+# as a warning when the two disagree.
+#
+# NOTE: sstrdaa.txt's time column has dt = 0.0004 s, i.e. 2500 Hz, not the
+# 5000 Hz set here — 50002 samples spanning 20.0004 s. One of the two is
+# wrong, and which it is decides whether the reported frequencies are right
+# or doubled. Left at 5000 so past results stay reproducible until it is
+# settled.
 FS          = 5000
 N_JOBS      = 1    # 1=serial  -1=all cores (verified identical to serial)
+
+# Signal conditioning, applied in this order: decimate, then cut the window.
+DECIMATE    = 1      # 1 = none. 4 would take 10 kHz down to 2.5 kHz
+T_START     = None   # seconds; None = start of record
+T_END       = None   # seconds; None = end of record
+                     # A transient usually wants the impact and its ringdown
+                     # only — most records here hold seconds of pre-trigger
+                     # noise and a long quiet tail, and the sweep cost is
+                     # proportional to the samples kept.
 
 # Data column layout
 COL_TIME        = 0
@@ -121,6 +153,7 @@ RUN_CLUSTER = True
 RUN_MODES   = True
 
 # Plot flags
+PLOT_TIME_HISTORY   = True     # excitation / responses, with the window shaded
 PLOT_PSD            = True     # excitation / response spectra, before the sweep
 PLOT_SIGNIFICANCE   = True
 PLOT_RECONSTRUCTION = True
@@ -163,8 +196,26 @@ if RUN_CVA:
     cfg = CVAConfig(lags=LAGS, tol=TOL, neighbors=NEIGHBORS,
                     ranklock=RANKLOCK, eval_stride=EVAL_STRIDE, fs=FS)
     run = CVARun(cfg)
-    run.load_data(DATA_FILE, col_time=COL_TIME, col_force=COL_FORCE,
-                  col_accel_start=COL_ACCEL_START, n_in=N_IN)
+
+    info = sniff_record(DATA_FILE)
+    if RESPONSE_FILE:
+        spec = default_spec(info, fs=FS or None,
+                            pair_info=sniff_record(RESPONSE_FILE))
+    else:
+        spec = RecordSpec(
+            input_path=Path(DATA_FILE), time_col=COL_TIME,
+            in_cols=list(range(COL_FORCE, COL_FORCE + N_IN)),
+            out_cols=list(range(COL_ACCEL_START, info.n_col)),
+            fs=FS or None)
+    spec.decimate = DECIMATE
+    spec.t_start, spec.t_end = T_START, T_END
+    run.load_record(spec)
+
+    if PLOT_TIME_HISTORY:
+        run.plot_time_history(
+            window=(T_START, T_END) if (T_START is not None
+                                        and T_END is not None) else None,
+            save_path=figpath('time_history'), dpi=PLOT_DPI)
     if PLOT_PSD:
         run.plot_spectral_density(save_path=figpath('spectral_density'),
                                   dpi=PLOT_DPI)
