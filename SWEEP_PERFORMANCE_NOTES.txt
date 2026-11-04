@@ -1,0 +1,218 @@
+CVA sweep performance — where the time goes
+===========================================
+
+3 November 2026. Measurement only; no code was changed. The question asked
+was "would parallelizing the code help?" — the short answer is yes, but not
+the way the code currently does it, and two algorithmic changes are worth
+more than the parallelism is.
+
+Machine: 10 cores (8 performance + 2 efficiency), Apple Silicon.
+Stack:   numpy 2.5.4, scipy 1.18.1, OpenBLAS 0.3.34 (pthread build,
+         10 threads), libomp 10 threads.
+
+________________________________________________________________________
+
+
+1. The headline
+---------------
+
+cva_run.py:624 hardcodes the joblib threading backend:
+
+    raw = Parallel(n_jobs=n_jobs, prefer='threads')(
+        delayed(_run_window)(kw) for kw in remaining)
+
+Threads share one process, so they share one OpenBLAS instance. OpenBLAS
+built with its own pthread pool serialises concurrent calls from several
+application threads on an internal buffer allocator, so ten worker threads
+doing LAPACK do not share the work — they queue for it. Separate processes
+each get their own OpenBLAS and the contention disappears.
+
+Switching the backend to processes is the whole fix.
+
+________________________________________________________________________
+
+
+2. Thread fan-out versus process fan-out
+----------------------------------------
+
+40 windows, 545x545 covariance matrices, 900 neighbors, 261 MB of
+past/future/input database, BLAS capped to 1 thread inside each worker.
+
+  configuration                   time     speedup  results
+  ------------------------------  -------  -------  ---------
+  serial, BLAS=1                  14.19 s    1.00x  reference
+  n_jobs=4,  threads,   BLAS=1    11.00 s    1.29x  identical
+  n_jobs=4,  processes, BLAS=1     5.59 s    2.54x  identical
+  n_jobs=10, threads,   BLAS=1    11.25 s    1.26x  identical
+  n_jobs=10, processes, BLAS=1     4.21 s    3.37x  identical
+
+"identical" means every window's rank matched the serial run and every
+eigenvalue magnitude matched to within 1e-12. Ranks were equal in all rows.
+
+Against today's actual default — serial with BLAS left unlimited, measured
+at 0.90 s/window — processes with BLAS pinned to 1 run at 0.105 s/window,
+so roughly 8.5x end to end.
+
+Why 3.37x and not 10x: only 8 of the 10 cores are performance cores, and
+40 windows do not amortise process-pool startup. A sweep of thousands of
+windows should do better than this figure.
+
+Process fan-out is viable here only because joblib auto-memmaps arrays
+larger than 1 MB. The 261 MB database is written to a temporary file once
+and mapped read-only by every worker, instead of being pickled per task.
+Without that, passing the database to ten processes would cost more than
+the computation.
+
+________________________________________________________________________
+
+
+3. Why threads were worse than useless
+--------------------------------------
+
+The matrices are too small to benefit from intra-operation threading, and
+the current default lets BLAS use all ten cores for each one:
+
+  one 545x545 factorisation      1 BLAS thread   10 BLAS threads
+  -----------------------------  --------------  ---------------
+  scipy.linalg.svd                      96.6 ms         252.3 ms
+  scipy.linalg.eigh                     37.6 ms         118.6 ms
+
+  full cvaonestep                        445 ms          874 ms
+
+Ten threads make a single factorisation 2.6x SLOWER. So n_jobs=10 with
+prefer='threads' stacked two separate pathologies: worker threads
+contending for the OpenBLAS allocator, and each of their LAPACK calls also
+fanning out to ten cores.
+
+That is what the earlier real-data benchmark was showing — 149 windows,
+measured before this session:
+
+  configuration                               time      vs default
+  ------------------------------------------  --------  ----------
+  n_jobs=1, BLAS unlimited (today's default)   87.5 s        1.00x
+  n_jobs=1, BLAS capped to 1                   42.1 s        2.08x
+  n_jobs=4, BLAS capped to 1                   51.3 s        1.70x
+  n_jobs=8, BLAS capped to 1                   50.8 s        1.72x
+  n_jobs=10, BLAS capped to 1                  50.9 s        1.72x
+
+The flat ~51 s across n_jobs 4, 8 and 10 was never scaling. It was
+saturating on contention — adding workers changed nothing because the
+workers were not the constraint.
+
+This also settles the caveat recorded in RECORD_LOADER_NOTES.md, that the
+capped serial run differed from the unlimited baseline by 3e-6 in
+eigenvalue magnitude while the capped parallel runs matched it to 7e-15.
+With the process backend the thread cap applies unambiguously per worker,
+and the results came back bit-identical.
+
+________________________________________________________________________
+
+
+4. Two algorithmic wins, both larger per unit of risk
+-----------------------------------------------------
+
+Parallelism divides the work. These remove it.
+
+
+4a. reduce_matrix runs a general SVD on a symmetric matrix
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+cva_core.py:114 calls scipy_svd(M) where M is a Tikhonov-regularised
+covariance matrix — always symmetric positive definite. For that case
+scipy.linalg.eigh is exact and much faster:
+
+  svd  96.6 ms  ->  eigh  37.6 ms      2.6x
+
+Verified equivalent on a 545x545 regularised covariance: singular values
+versus eigenvalues differed by 1.46e-15 relative to the largest, and the
+rank at tol=1e-3 was the same from both.
+
+Two of the three factorisations per window are these calls, so this is
+about a third off the window cost on its own, with no change in results.
+The eigenvalues come back ascending, so they need reversing to match the
+descending order the rank test and the whitening assume.
+
+
+4b. The Gpf SVD factorises a mostly-zero matrix
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+reduce_matrix sets diag_elements[i] = 0 for every i >= rank, so all rows
+of Vpr past rankpast are exactly zero, and likewise for Vfr. That means
+
+    Gpf = Vpr @ Spf @ Vfr.T
+
+has nonzero content only in its top-left rankpast x rankfuture block — but
+cva_core.py:268 factorises all 545x545 of it, because LAPACK cannot know.
+
+Downstream only uses Ug[:, :rnk] (via J = (Ug @ Intdiag).T @ Vpr) and the
+first rnk rows of Vgt (via L). So computing the SVD on the nonzero block
+and padding the result back is exact, not an approximation.
+
+If the rank at the working tolerance is in the tens — likely for Hankel
+data from a handful of channels, though it should be confirmed against the
+"Rank determined from window 0" line the runs already print — that step
+drops from about 100 ms to near-free. The win grows with the lag count.
+
+
+4c. Smaller: the neighbour index is rebuilt every window
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+cva_core.py:215-217 constructs a NearestNeighbors object and fits it to the
+whole past database on every call, although past never changes across a
+sweep. Only querypast differs. sklearn picks the brute-force method at
+these dimensions, so the fit itself is cheap and the query does the work:
+
+  fit + query, as written                   3.11 ms
+  query only, database hoisted              2.15 ms
+
+  100 single queries                      317.75 ms
+  the same 100 as one batched query        39.68 ms
+
+Worth about 1 ms per window from hoisting the fit, and 8x on this piece
+from batching the queries — small against a 445 ms window, but nearly free
+to do while the file is open.
+
+________________________________________________________________________
+
+
+5. Recommended order
+--------------------
+
+  1. cva_run.py:624 — replace prefer='threads' with the process backend,
+     and apply threadpool_limits(1) inside the worker function rather than
+     around the Parallel call.
+  2. cva_core.py:114 — eigh instead of svd in reduce_matrix, reversing the
+     eigenvalue order.
+  3. cva_core.py:268 — truncate the Gpf SVD to its nonzero rank block.
+  4. cva_core.py:215 — hoist the neighbour database out of the sweep and
+     batch the queries.
+
+These compose: processes for the fan-out, the other three to shrink what
+each worker does.
+
+Also outstanding from before: the README's Parallelism section still
+credits a "roughly 2x speedup" to n_jobs, which the measurements above
+contradict. It needs rewriting once the backend change lands.
+
+________________________________________________________________________
+
+
+6. One loose end
+----------------
+
+Threaded fan-out measured inconsistently depending on where the BLAS cap
+was applied:
+
+  cap set around the whole Parallel call    0.36x - 0.42x  (slower than serial)
+  cap set inside each worker task           1.26x - 1.29x
+
+Both should set the limit process-wide for the same OpenBLAS instance, so
+the gap is not explained. It does not affect the recommendation — neither
+figure comes close to the 3.37x from processes — but the threaded numbers
+in section 2 should be read as the more favourable of the two measurements,
+not as a tight bound.
+
+The benchmarks used synthetic Gaussian data at shapes taken from the
+committed defaults, which comes out full rank. Real records will have lower
+rank, which shifts the balance further toward section 4b and away from the
+factorisation costs in section 3.
