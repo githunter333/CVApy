@@ -424,8 +424,17 @@ def plot_comparison(results: Sequence[SpectraResult], channel: int = -1,
             ax.bar(x + (i - (n - 1) / 2) * w, fn(r), w, color=col,
                    label=r.label)
         ax.axhline(0, color='k', lw=0.8)
-        ax.set_xticks(x, [s.split()[-1] for s in r0.names])
-        ax.set_xlabel(f"{r0.names[0].rsplit(' ', 1)[0]} number")
+        # "mass 1", "mass 2", ... -> ticks 1, 2, ... under "mass number";
+        # any other naming is shown in full
+        heads = {s.rsplit(' ', 1)[0] for s in r0.names}
+        if len(heads) == 1 and all(s.split()[-1].isdigit() and ' ' in s
+                                   for s in r0.names):
+            ax.set_xticks(x, [s.split()[-1] for s in r0.names])
+            ax.set_xlabel(f"{heads.pop()} number")
+        else:
+            ax.set_xticks(x, r0.names, rotation=30 if len(r0.names) > 6
+                          else 0, ha='right' if len(r0.names) > 6
+                          else 'center')
         ax.set_title(title, fontsize=10)
         ax.grid(True, axis='y', alpha=0.3)
         ax.legend(fontsize=7, framealpha=0.9)
