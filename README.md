@@ -22,6 +22,28 @@ conda create -y -n cvapy -c conda-forge python=3.13 numpy scipy scikit-learn h5p
 Verified with Python 3.13.18, numpy 2.5.4, scipy 1.18.1, scikit-learn 1.9.1,
 h5py 3.16.0, matplotlib 3.11.2, joblib 1.6.0, PySide6 6.11.3.
 
+### Setting up on another computer
+
+Nothing here needs more than Python and the packages above.
+
+1. Install Miniconda or Anaconda, and Git.
+2. Get the code (or copy the folder across; `results/` is not needed):
+
+   ```bash
+   git clone -b nonlinearity-analysis git@github.com:githunter333/CVApy.git
+   cd CVApy
+   ```
+
+   The nonlinearity analyses are on the `nonlinearity-analysis` branch until
+   it is merged into `main`.
+3. Create the environment with the `conda create` line above, then
+   `conda activate cvapy`.
+4. Check it: `conda install -y pytest`, then `python -m pytest tests -q`
+   should end with every test passed.
+
+To analyse your own data see *Running the nonlinearity analyses on your own
+data* below.
+
 ## Running
 
 **GUI** — parameter panel, tabbed figures, live log, with the CVA pipeline
@@ -277,8 +299,75 @@ full_report(inputd, datout, fs, 'results/mytest', names=channel_names,
             channel=3)          # writes the pages and tables.txt
 ```
 
-`run_blockhead.py` does this for the Area III 6-DOF blockhead test (six
-table motions in, 12 or 24 accelerometers out).
+`run_blockhead.py` does this for the Area III 6-DOF blockhead test, with the
+six table motions as inputs:
+
+```bash
+python run_blockhead.py            # the 12 "target" channels on the block
+python run_blockhead.py --full     # all 24 block channels
+python run_blockhead.py --nut      # lower nut accelerometer, A10
+python run_blockhead.py --base     # base plate corners, A1-A4
+```
+
+Several options can be given together. The six inputs are computed from the
+base plate channels, so with `--base` the non-coherent figures are low by
+construction; skewness, kurtosis, out-of-band energy and coupling do not
+depend on the inputs.
+
+`run_blockhead_time.py` asks a separate question of the same test: does the
+spectral density change during the record? It splits the record into 1 s
+blocks and, for all 45 channels, compares the power in three frequency
+ranges and the first third of the record against the last third.
+
+### Running the nonlinearity analyses on your own data
+
+The analyses need **time histories**: the control accelerometer(s) as
+inputs and the response channels, sampled together at one rate. Spectra
+alone (PSD, coherence, FRF) are not enough; only the coherent / non-coherent
+/ out-of-band split could be formed from them, and the code does not read
+spectra.
+
+**Text files, in the GUI.** Columns of numbers, with or without a time
+column and header lines, or a paired `<name>in.dat` / `<name>out.dat` (see
+*Records*). Run `python cva_gui.py`, open the record, set each control
+accelerometer column to Excitation in the Record panel, give the sample rate
+if there is no time column, and press **Analyse Nonlinearity**.
+
+**MATLAB `.mat` files, or anything else, in a short script.** Load the
+arrays yourself and hand them to `full_report`. Save this as, say,
+`run_mytest.py` in the CVApy folder and edit the four marked lines:
+
+```python
+import scipy.io as sio
+from cva_report import full_report
+
+m = sio.loadmat('/path/to/mytest.mat')           # <- your file
+inputs = m['control']        # <- (samples, n_inputs) control accelerometers
+responses = m['response']    # <- (samples, n_responses)
+fs = 12800.0                 # <- sample rate, Hz
+
+names = [f"ch {c + 1}" for c in range(responses.shape[1])]
+full_report(inputs, responses, fs, 'results/mytest', label='my test',
+            names=names, channel=0)
+```
+
+```bash
+MPLBACKEND=Agg python run_mytest.py
+```
+
+The pages (PNG) and `tables.txt` appear in `results/mytest/`.
+
+- Arrays must have one **column** per channel. If yours are one row per
+  channel, use `m['control'].T`.
+- `channel` picks the response shown on the single-channel pages (residual
+  and coupling); every table covers all channels.
+- `scipy.io.loadmat` cannot read files saved with MATLAB's `-v7.3` option.
+  Re-save without it, or read the file with `h5py`.
+- With several inputs pass `nperseg` so that there are at least ten Welch
+  segments per input (the blockhead run uses `nperseg=8192` for six inputs
+  and 23 s at 12,800 Hz); otherwise the coherence reads high.
+- For a text file in a script, `numpy.loadtxt` gives the array; split its
+  columns into inputs and responses the same way.
 
 In the GUI these are the **Nonlinearity analysis** group and the **Analyse
 Nonlinearity** button. They need only a loaded record with an excitation
