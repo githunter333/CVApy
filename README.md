@@ -30,12 +30,9 @@ Nothing here needs more than Python and the packages above.
 2. Get the code (or copy the folder across; `results/` is not needed):
 
    ```bash
-   git clone -b nonlinearity-analysis git@github.com:githunter333/CVApy.git
+   git clone git@github.com:githunter333/CVApy.git
    cd CVApy
    ```
-
-   The nonlinearity analyses are on the `nonlinearity-analysis` branch until
-   it is merged into `main`.
 3. Create the environment with the `conda create` line above, then
    `conda activate cvapy`.
 4. Check it: `conda install -y pytest`, then `python -m pytest tests -q`
