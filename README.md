@@ -24,7 +24,8 @@ h5py 3.16.0, matplotlib 3.11.2, joblib 1.6.0, PySide6 6.11.3.
 
 ## Running
 
-**GUI** — parameter panel, tabbed figures, live log, pipeline on a worker thread:
+**GUI** — parameter panel, tabbed figures, live log, with the CVA pipeline
+and the nonlinearity analyses each on a worker thread:
 
 ```bash
 conda activate cvapy && python cva_gui.py
@@ -142,6 +143,184 @@ set `RUN_CVA` / `RUN_CLUSTER` / `RUN_MODES` to `False`.
 | `n_jobs` | 1 = serial, -1 = all cores (verified bit-identical to serial) |
 | `f_min` / `f_max` | frequency band for clustering and mode shapes |
 | `n_clusters` | 0 = auto-detect via elbow |
+
+## Nonlinearity indicators from spectra
+
+`cva_spectra.py` is the first look at a record, before any model is fitted.
+It splits each response's spectral density into the part linearly related to
+the input (coherent) and the part that is not, measures the energy above the
+excitation band, and reports skewness and excess kurtosis with standard
+errors.
+
+```python
+from cva_spectra import analyze_record, plot_record, plot_comparison
+res = analyze_record(inputd, datout, fs, label='0 dB')
+res.table()
+plot_record(res)                    # one record
+plot_comparison([low, res])         # test levels, or baseline against case
+```
+
+With several inputs the coherence is the multiple coherence. Channels marked
+*resolution-limited* have a resonance narrower than the frequency resolution;
+their non-coherent share is an upper bound, so pass a longer `nperseg` or
+judge them against a linear or low-level record of the same system.
+
+`run_r6dof_spectra.py` runs it over the simulated six-mass records and
+writes the figures to `results/step1/`. Those records are sampled at
+2500 Hz, and the base acceleration actually applied is column 7 of each
+`...out.dat` file.
+
+## The non-coherent response in time
+
+`cva_residual.py` turns the non-coherent part into a time history: the
+measured input is passed through the estimated frequency response and the
+result subtracted from the measured response. What is left shows *when* the
+nonlinearity acts.
+
+```python
+from cva_residual import noncoherent_history, plot_residual, track_residual
+rr = noncoherent_history(inputd, datout, fs, label='0 dB')
+rr.table()                      # share, kurtosis, level exponent per channel
+plot_residual(rr, channel=3)    # five views of one channel
+track_residual(rr).summary()    # frequency and damping of the residual's peaks
+```
+
+The level exponent says whether the residual grows faster than the response
+(positive, cubic-like), in step with it (tension/compression), or matters
+most at low level (negative: free play). Its sign and ordering are reliable;
+its size is understated, because the residual rings on after the level that
+caused it has passed.
+
+`run_r6dof_residual.py` writes these for the six-mass records to
+`results/step2/`.
+
+## Modes against level, and peaks above the excitation band
+
+`cva_level.py` sets each tracked in-band mode's frequency and damping
+against the response level in the same block. A linear system gives flat
+lines; several records of one system (test levels) can share the axes.
+
+```python
+from cva_level import track_in_band, level_dependence, plot_level
+trk = track_in_band(time, inputd, datout, fs, band_top)
+lv = level_dependence(trk, label='0 dB')
+lv.table()                      # % change per doubling of level, with s.e.
+plot_level([lv_low, lv])
+```
+
+`cva_bands.py` takes each response peak above the excitation band and gives
+its band-limited time history and envelope at every channel, its frequency
+and apparent damping block by block, which channels carry it, and how its
+level moves against the in-band level.
+
+```python
+from cva_bands import analyze_bands, plot_band
+bb = analyze_bands(datout, fs, band_top=416.0, label='dead zone')
+bb.table()
+plot_band(bb, 0)
+bb.bands[0].signal              # (N, n_out) time history of that band
+```
+
+Bands are found from the spectrum, or passed as `bands=[(centre, half), ...]`.
+On synthetic modes of known properties the frequency reads within about
+0.3% and the damping within about 5%. On real nonlinear records the damping
+is *apparent*: frequency wander within a block reads as extra damping, so
+the page also shows the value from the spectral peak width.
+
+`run_r6dof_level_bands.py` writes both for the six-mass records to
+`results/step3/`.
+
+## Frequency coupling, and one state or two
+
+`cva_hos.py` asks which frequencies are phase-locked to which. Quadratic
+coupling (bicoherence: f1 and f2 locked to f1 + f2) marks an asymmetric
+nonlinearity such as stiffness that differs in tension and compression.
+Cubic coupling (f1, f1 and f2 locked to 2 f1 + f2) without quadratic marks
+a symmetric one: a cubic spring, free play. Each cell is judged against its
+own floor, worked out from the record itself.
+
+```python
+from cva_hos import analyze_hos, plot_hos
+hh = analyze_hos(datout, fs, band_top=416.0)
+hh.table()                  # per channel: asymmetric, symmetric or none
+hh.pair_table(3)            # coupling at the in-band mode pairs
+plot_hos(hh, channel=3)
+```
+
+Keep the frequency resolution no finer than the width of the modes
+(`nperseg`); a mode spread over several bins reads weaker.
+
+`cva_regimes.py` tests whether the system has two states at the same
+response level (coexisting attractors) or one state that merely looks
+different in the loud and quiet stretches of the record. It removes the
+level dependence from each in-band mode frequency and from the non-coherent
+level, and looks for two separated, persistent clusters in what is left.
+
+```python
+from cva_level import track_in_band
+from cva_regimes import analyze_regimes, plot_regimes
+rg = analyze_regimes(track_in_band(time, inputd, datout, fs, band_top), rr)
+rg.summary()                # verdict, and each state's frequencies and damping
+plot_regimes(rg)
+```
+
+`run_r6dof_hos.py` and `run_r6dof_regimes.py` write these for the six-mass
+records to `results/step4/` and `results/step5/`.
+
+### All of it in one call, and in the GUI
+
+`cva_report.py` runs every analysis above on one record:
+
+```python
+from cva_report import full_report
+full_report(inputd, datout, fs, 'results/mytest', names=channel_names,
+            channel=3)          # writes the pages and tables.txt
+```
+
+`run_blockhead.py` does this for the Area III 6-DOF blockhead test (six
+table motions in, 12 or 24 accelerometers out).
+
+In the GUI these are the **Nonlinearity analysis** group and the **Analyse
+Nonlinearity** button. They need only a loaded record with an excitation
+channel, not the CVA sweep, and work over the analysis window. The pages
+appear as tabs after the time history and spectral density: Nonlinearity,
+Residual, Level, one per out-of-band peak, Coupling and Regimes. The
+single-channel pages follow the `channel` setting in the Plots group;
+change it and press **Regenerate Plots**, with no need to re-run.
+
+One window serves both jobs because they share everything up to the
+analysis itself: reading the record, assigning channel roles, the sample
+rate, and choosing the window. **Run Pipeline** remains the CVA sweep with
+clustering and mode shapes; the two can be run in either order on the same
+record.
+
+## Time-block tracking
+
+`cva_block.py` answers a different question from the pipeline above: how do
+frequency, damping and mode shape *evolve along the record*? It fits a short
+input/output model (4 lags by default) to each contiguous block of time
+(0.5 s by default, half-overlapping) and matches the poles from block to block
+by frequency and mode-shape correlation, so each mode becomes one track.
+
+```python
+from cva_block import BlockConfig, BlockTracker
+trk = BlockTracker.from_run(run, BlockConfig(lags=4, block_sec=0.5))
+trk.summary()          # mean, block-to-block scatter, trend per mode
+fig = trk.plot_tracks()
+```
+
+It reports the *effective* properties over each block. A joint that changes
+state within a cycle is averaged, not resolved into its separate states.
+With a single response channel there is no mode shape to reject numerical
+poles, so set `freq_max` to the band of interest and use more lags (16 or so).
+
+`cva_sim.py` simulates a six-mass chain with a joint that is softer in
+tension, optionally softening along the record, and keeps the true modal
+values. `tests/test_cva_block.py` scores the tracker against it:
+
+```bash
+python -m pytest tests -q
+```
 
 ## Plotting
 

@@ -57,7 +57,8 @@ from matplotlib.widgets import SpanSelector
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGridLayout,
+    QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
     QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget,
@@ -293,6 +294,41 @@ class PreviewWorker(QObject):
             sys.stdout = saved_stdout
 
 
+class NonlinearWorker(QObject):
+    """Runs the nonlinearity analyses (cva_report.analyze_all) off the GUI
+    thread. Only arithmetic happens here; the pages are drawn afterwards on
+    the GUI thread, where matplotlib figures have to be made."""
+
+    done   = Signal(object, str)         # results dict, tables text
+    failed = Signal(str)
+
+    def __init__(self, inputd, datout, fs, time, kw):
+        super().__init__()
+        self.args = (inputd, datout, fs)
+        self.time = time
+        self.kw = kw
+        self.lines = deque()
+        self.status = (0, 'Nonlinearity analysis …')
+        self._stop = False
+
+    def request_stop(self):
+        """Honoured between steps; a step in progress runs to its end."""
+        self._stop = True
+
+    @Slot()
+    def execute(self):
+        from cva_report import analyze_all
+        try:
+            def progress(pct, name):
+                self.status = (pct, f'Nonlinearity analysis — {name} …')
+            res, text = analyze_all(*self.args, time=self.time,
+                                    progress=progress,
+                                    stop=lambda: self._stop, **self.kw)
+            self.done.emit(res, text)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 # =============================================================================
 # Figure tab
 # =============================================================================
@@ -460,6 +496,36 @@ class ParamPanel(QScrollArea):
             cb.setChecked(default)
             self.w[key] = cb
             f.addWidget(cb)
+        root.addWidget(g)
+
+        # ---------- nonlinearity analysis ----------
+        g = QGroupBox('Nonlinearity analysis')
+        g.setToolTip(
+            'Needs only a loaded record with an excitation channel, not the '
+            'CVA sweep. Uses the analysis window above. Run it with the '
+            'Analyse Nonlinearity button.')
+        f = QVBoxLayout(g)
+        for key, label in (
+                ('nl_spectra',  'Coherent / non-coherent / out-of-band'),
+                ('nl_residual', 'Non-coherent response in time'),
+                ('nl_level',    'In-band modes against level'),
+                ('nl_bands',    'Peaks above the excitation band'),
+                ('nl_coupling', 'Frequency coupling (source type)'),
+                ('nl_regimes',  'One state or two')):
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            self.w[key] = cb
+            f.addWidget(cb)
+        nf = QFormLayout()
+        nf.addRow('coherence nperseg (0=auto)',
+                  self._spin('nl_nperseg', 0, 0, 1 << 20))
+        nf.addRow('coupling nperseg', self._spin('nl_hos_nperseg', 1024, 64,
+                                                 1 << 16))
+        nf.addRow('mode-track lags', self._spin('nl_lags', 2, 1, 64))
+        nf.addRow('block length (s)', self._text('nl_block', '0.5'))
+        holder = QWidget()
+        holder.setLayout(nf)
+        f.addWidget(holder)
         root.addWidget(g)
 
         # ---------- plots ----------
@@ -800,7 +866,7 @@ class ParamPanel(QScrollArea):
         for key in ('tol', 'fs', 'freq_min', 'freq_max',
                     'sig_threshold_fraction', 'n_pca_var', 'f_min', 'f_max',
                     'min_im_frac', 'zeta_max', 'z_threshold', 'band_half',
-                    'psd_fmax'):
+                    'psd_fmax', 'nl_block'):
             p[key] = num(key)
 
         p['fs'] = p['fs'] or None
@@ -835,6 +901,7 @@ class MainWindow(QMainWindow):
         self.resize(1500, 950)
 
         self.run_obj = None
+        self._nl_res = None          # results of the nonlinearity analyses
         self.clust_obj = None
         self.ms_obj = None
         self.thread = None
@@ -863,6 +930,12 @@ class MainWindow(QMainWindow):
         self.btn_run = QPushButton('Run Pipeline')
         self.btn_run.setDefault(True)
         self.btn_run.clicked.connect(self.start_pipeline)
+        self.btn_nl = QPushButton('Analyse Nonlinearity')
+        self.btn_nl.setToolTip(
+            'Run the ticked nonlinearity analyses on the loaded record, '
+            'over the analysis window. Independent of the CVA pipeline.')
+        self.btn_nl.setEnabled(False)
+        self.btn_nl.clicked.connect(self.start_nonlinear)
         self.btn_stop = QPushButton('Stop')
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.stop_pipeline)
@@ -870,11 +943,12 @@ class MainWindow(QMainWindow):
         self.btn_plots.setEnabled(False)
         self.btn_plots.clicked.connect(self.build_figures)
 
-        btns = QHBoxLayout()
-        btns.addWidget(self.btn_preview)
-        btns.addWidget(self.btn_run)
-        btns.addWidget(self.btn_stop)
-        btns.addWidget(self.btn_plots)
+        btns = QGridLayout()
+        btns.addWidget(self.btn_preview, 0, 0)
+        btns.addWidget(self.btn_plots, 0, 1)
+        btns.addWidget(self.btn_run, 1, 0)
+        btns.addWidget(self.btn_nl, 1, 1)
+        btns.addWidget(self.btn_stop, 2, 0, 1, 2)
 
         left = QWidget()
         ll = QVBoxLayout(left)
@@ -1044,7 +1118,9 @@ class MainWindow(QMainWindow):
         self._remember(cache)
         # A new record invalidates anything held from the previous one.
         self.run_obj, self.clust_obj, self.ms_obj = run, None, None
+        self._nl_res = None
         self.btn_plots.setEnabled(True)
+        self.btn_nl.setEnabled(run.inputd is not None)
         self.progress.setValue(0)
         self.build_figures()
         # after build_figures, which writes its own status line
@@ -1121,7 +1197,8 @@ class MainWindow(QMainWindow):
             self.worker.request_stop()
             self.btn_stop.setEnabled(False)
             self.statusBar().showMessage(
-                'Stopping — the sweep gives up at the next window …')
+                'Stopping — at the next window, or the end of the current '
+                'analysis step …')
 
     def _teardown_thread(self):
         self._drain_worker()          # whatever arrived since the last tick
@@ -1134,6 +1211,8 @@ class MainWindow(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_preview.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.btn_nl.setEnabled(self.run_obj is not None
+                               and self.run_obj.inputd is not None)
 
     @Slot(object, object, object)
     def on_done(self, run, clust, ms):
@@ -1162,7 +1241,96 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, title, tb.strip().splitlines()[-1])
 
     # ------------------------------------------------------------------
-    def build_figures(self):
+    # nonlinearity analysis (cva_report): independent of the CVA pipeline
+    # ------------------------------------------------------------------
+    NL_STEPS = (('nl_spectra', 'spectra'), ('nl_residual', 'residual'),
+                ('nl_level', 'level'), ('nl_bands', 'bands'),
+                ('nl_coupling', 'coupling'), ('nl_regimes', 'regimes'))
+
+    def _nl_steps(self, p):
+        return [step for key, step in self.NL_STEPS if p[key]]
+
+    def start_nonlinear(self):
+        """Run the ticked nonlinearity analyses on the loaded record."""
+        if self.thread is not None:
+            return
+        run = self.run_obj
+        if run is None or run.datout is None:
+            QMessageBox.information(self, 'No record',
+                                    'Load a record first.')
+            return
+        if run.inputd is None:
+            QMessageBox.information(
+                self, 'No excitation channel',
+                'These analyses need an excitation channel. Give one '
+                'column the Excitation role in the Record panel and '
+                'reload.')
+            return
+        try:
+            p = self.params.values()
+        except ValueError as e:
+            QMessageBox.warning(self, 'Check parameters', str(e))
+            return
+        steps = self._nl_steps(p)
+        if not steps:
+            QMessageBox.information(self, 'Nothing ticked',
+                                    'Tick at least one analysis.')
+            return
+
+        t = np.asarray(run.time, float)
+        lo = t[0] if p['t_start'] is None else p['t_start']
+        hi = t[-1] if p['t_end'] is None else p['t_end']
+        m = (t >= lo) & (t <= hi)
+        if m.sum() < 2048:
+            QMessageBox.warning(
+                self, 'Window too short',
+                f'The analysis window holds {int(m.sum())} samples; these '
+                f'analyses need a few thousand at least.')
+            return
+        U = np.asarray(run.inputd, float)
+        U = U[m] if U.ndim == 1 else U[m, :]
+        Y = np.asarray(run.datout, float)[m]
+        names = list(getattr(run, 'out_names', None) or [])
+        if len(names) != Y.shape[1]:
+            names = None
+
+        self._fail_title = 'Nonlinearity analysis failed'
+        self.append_log('\n' + '=' * 62)
+        self.append_log(f'  Nonlinearity analysis — {t[m][0]:.3f} to '
+                        f'{t[m][-1]:.3f} s, {int(m.sum())} samples, '
+                        f'{Y.shape[1]} responses')
+        self.append_log('  ' + ', '.join(steps))
+        self.append_log('=' * 62)
+        for b in (self.btn_run, self.btn_preview, self.btn_plots,
+                  self.btn_nl):
+            b.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.progress.setValue(0)
+
+        kw = dict(label=Path(p['data_file']).stem, names=names,
+                  channel=p['channel'], nperseg=p['nl_nperseg'],
+                  hos_nperseg=p['nl_hos_nperseg'], track_lags=p['nl_lags'],
+                  block_sec=p['nl_block'] or 0.5, steps=steps)
+        self.thread = QThread(self)
+        self.worker = NonlinearWorker(U, Y, float(run.fs), t[m], kw)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.execute)
+        self.worker.done.connect(self.on_nonlinear_done)
+        self.worker.failed.connect(self.on_failed)
+        self._last_status = None
+        self._poll.start()
+        self.thread.start()
+
+    @Slot(object, str)
+    def on_nonlinear_done(self, res, text):
+        self._teardown_thread()
+        self.btn_plots.setEnabled(self.run_obj is not None)
+        self._nl_res = res
+        self.append_log(text)
+        self.build_figures(select='Nonlinearity')
+
+    # ------------------------------------------------------------------
+    def build_figures(self, *_, select=None):
         if self.run_obj is None:
             return
         try:
@@ -1241,6 +1409,28 @@ class MainWindow(QMainWindow):
                     if title == 'Time history':
                         th_fig = fig
                 QApplication.processEvents()
+
+            # Pages from the last nonlinearity analysis, redrawn here so
+            # the channel, f max and DPI settings apply to them too.
+            if self._nl_res is not None:
+                try:
+                    from cva_report import plot_all
+                    c = min(p['channel'],
+                            len(self._nl_res['_names']) - 1)
+                    for title, fig, _ in plot_all(
+                            self._nl_res, channel=c, f_max=p['psd_fmax'],
+                            dpi=p['dpi'], steps=self._nl_steps(p)):
+                        self._figs.append(fig)
+                        self.tabs.addTab(FigureTab(fig), title)
+                        QApplication.processEvents()
+                except Exception:
+                    self.append_log('[plot] nonlinearity pages failed:\n'
+                                    + traceback.format_exc())
+            if select:
+                for i in range(self.tabs.count()):
+                    if self.tabs.tabText(i) == select:
+                        self.tabs.setCurrentIndex(i)
+                        break
 
             self._attach_spans(th_fig)
 
