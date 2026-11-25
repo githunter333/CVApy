@@ -218,8 +218,11 @@ supported.)
 `run_r6dof_sweep.py` runs the sweep on the simulated six-mass records with
 all three neighbour choices and writes tables and figures to
 `results/sweep/`: order against the linear baseline, each mode against
-response level, and how often each mode is found from quiet to loud
-windows. A mode that moves more than `match_tol` (3%) from its median
+response level, how often each mode is found from quiet to loud
+windows, and (`sweep_time_<record>.png`) level, order, every pole and each
+mode's frequency and damping against time. The script tracks a mode when
+its pole is in 20% of the windows (`PERSISTENCE`; the tracker's own default
+is 50%), so bands that appear only at some levels get a track. A mode that moves more than `match_tol` (3%) from its median
 frequency drops out of its track, so a strongly hardening mode shows as
 "found" less often at high level.
 

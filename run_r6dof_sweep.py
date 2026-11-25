@@ -15,7 +15,11 @@ time, level) and reports:
     window to window, and its change per doubling of response level;
   * each mode's shift from the linear record's, poles the linear record
     does not have, and at what level they appear;
-  * one state or two.
+  * one state or two;
+  * against time: level, order, every pole, and each mode's frequency and
+    damping (sweep_time_<record>.png).
+
+A mode is tracked when its pole is in PERSISTENCE (20%) of the windows.
 
 Figures and tables.txt go to results/sweep/.
 """
@@ -37,6 +41,8 @@ MODES = ('shape', 'time', 'level')
 COLORS = {'shape': 'tab:orange', 'time': 'tab:blue', 'level': 'tab:green'}
 LAGS, TOL, NEIGHBORS, STRIDE = 16, 5e-4, 960, 250
 F_MAX = 1000.0
+PERSISTENCE = 0.2            # a mode is tracked if its pole is in this
+                             # share of the windows (tracker default 0.5)
 BASELINE = {'cubic ss, 5x level': 'linear, 5x level'}   # default: 'linear'
 
 
@@ -58,7 +64,8 @@ def sweep(label, mode):
     with contextlib.redirect_stdout(log):
         run.build_database()
         run.run(n_jobs=4)
-        cl = CVAPhiCluster(run, f_max=F_MAX)
+        cl = CVAPhiCluster(run, f_max=F_MAX,
+                           min_persistence=PERSISTENCE)
         try:
             cl.fit()
         except ValueError as e:        # no pole repeats from window to window
@@ -192,6 +199,130 @@ def plot_record(label, res, base, save_path):
     plt.close(fig)
 
 
+def plot_time(label, res, base, save_path, pole_mode='time'):
+    """Per record, against time: response level, the order each window
+    supports, every pole found, and each tracked mode's frequency and
+    damping for the three neighbour choices."""
+    import matplotlib.pyplot as plt
+    # modes tracked with any neighbour choice, merged within 3%
+    refs = []
+    for mode in ('level', 'time', 'shape'):
+        for f0 in res[mode]['cl'].ref_freq:
+            if not any(abs(f0 - r) < 0.03 * r for r in refs):
+                refs.append(float(f0))
+    refs = np.sort(refs)
+    nm = len(refs)
+    fig = plt.figure(figsize=(15, 9.5 + 2.6 * nm))
+    gs = fig.add_gridspec(3 + nm, 2,
+                          height_ratios=[0.8, 0.8, 2.2] + [1] * nm)
+
+    def times(r):
+        return np.array([r['run'].windows[w].time for w in r['cl'].use_idx])
+
+    ax_l = fig.add_subplot(gs[0, :])
+    r = res[pole_mode]
+    t = times(r)
+    ax_l.semilogy(t, r['lev'] / np.median(r['lev']), color='0.25', lw=0.9,
+                  label='response level in each window / median')
+    ax_l.set_ylabel('level / median')
+    ax_l.set_title('Response level', fontsize=10, loc='left')
+    ax_l.legend(fontsize=8, loc='upper right')
+    ax_l.grid(True, alpha=0.3, which='both')
+
+    ax_o = fig.add_subplot(gs[1, :], sharex=ax_l)
+    for mode in MODES:
+        rr = res[mode]
+        o = np.array([rr['run'].windows[w].rank_auto
+                      for w in rr['cl'].use_idx])
+        ax_o.plot(times(rr), o, '-', color=COLORS[mode], lw=0.8, alpha=0.85,
+                  label=f"neighbours by {mode}: median {np.median(o):.0f}")
+    if base is not None:
+        ob = base[1]['level']['run'].order_report(verbose=False)['order']
+        ax_o.axhline(ob, color='k', lw=1.0,
+                     label=f"{base[0]} record: {ob:.0f}")
+    ax_o.set_ylabel('states')
+    ax_o.set_title('Model order each window supports', fontsize=10,
+                   loc='left')
+    ax_o.legend(fontsize=8, ncol=4, loc='upper right')
+    ax_o.grid(True, alpha=0.3)
+
+    ax_p = fig.add_subplot(gs[2, :], sharex=ax_l)
+    cl = r['cl']
+    tt, ff, zz = [], [], []
+    for ti, wi in zip(t, cl.use_idx):
+        _, fr, ze = cl._window_poles(wi)
+        tt.append(np.full(len(fr), ti)); ff.append(fr); zz.append(ze)
+    tt, ff, zz = map(np.concatenate, (tt, ff, zz))
+    sc = ax_p.scatter(tt, ff, c=100 * zz, s=5, cmap='viridis_r',
+                      vmin=0, vmax=10, label='one pole in one window')
+    fig.colorbar(sc, ax=ax_p, pad=0.01, label='damping, % of critical')
+    for j, f0 in enumerate(refs):
+        ax_p.axhline(f0, color='tab:red', lw=0.6, alpha=0.6,
+                     label='tracked modes (panels below)' if j == 0 else None)
+    if base is not None:
+        for j, f0 in enumerate(base[1]['level']['cl'].ref_freq):
+            ax_p.axhline(f0, color='k', lw=0.6, ls='--', alpha=0.6,
+                         label=f"modes tracked in the {base[0]} record"
+                         if j == 0 else None)
+    ax_p.set_ylim(0, F_MAX)
+    ax_p.set_ylabel('Hz')
+    ax_p.set_title(f'Every pole found, window by window '
+                   f'(neighbours by {pole_mode})', fontsize=10, loc='left')
+    ax_p.legend(fontsize=8, ncol=3, loc='upper right')
+    ax_p.grid(True, alpha=0.3)
+
+    for j, f0 in enumerate(refs):
+        ax_f = fig.add_subplot(gs[3 + j, 0], sharex=ax_l)
+        ax_z = fig.add_subplot(gs[3 + j, 1], sharex=ax_l)
+        for mode in MODES:
+            rr = res[mode]
+            c = rr['cl']
+            if len(c.ref_freq) == 0:
+                continue
+            k = int(np.argmin(np.abs(c.ref_freq - f0)))
+            if abs(c.ref_freq[k] - f0) > 0.03 * f0:
+                continue
+            f, z = c.track_freq[:, k], 100 * c.track_zeta[:, k]
+            found = 100 * np.isfinite(f).mean()
+            ax_f.plot(times(rr), f, '.', color=COLORS[mode], ms=3,
+                      alpha=0.7,
+                      label=f"by {mode}: {np.nanmedian(f):.2f} "
+                            f"± {np.nanstd(f):.3g} Hz, in {found:.0f}%")
+            ax_z.plot(times(rr), z, '.', color=COLORS[mode], ms=3,
+                      alpha=0.7,
+                      label=f"by {mode}: {np.nanmedian(z):.2f} "
+                            f"± {np.nanstd(z):.2g} %")
+        if base is not None:
+            bc = base[1]['level']['cl']
+            k = int(np.argmin(np.abs(bc.ref_freq - f0)))
+            if abs(bc.ref_freq[k] - f0) < 0.03 * f0:
+                ax_f.axhline(bc.ref_freq[k], color='k', lw=1.0,
+                             label=f"{base[0]} record: "
+                                   f"{bc.ref_freq[k]:.2f} Hz")
+                zb = 100 * np.nanmedian(bc.track_zeta[:, k])
+                ax_z.axhline(zb, color='k', lw=1.0,
+                             label=f"{base[0]} record: {zb:.2f} %")
+        ax_f.ticklabel_format(axis='y', useOffset=False)
+        ax_f.set_title(f"mode near {f0:.1f} Hz: frequency", fontsize=10,
+                       loc='left')
+        ax_z.set_title(f"mode near {f0:.1f} Hz: damping", fontsize=10,
+                       loc='left')
+        ax_f.set_ylabel('Hz')
+        ax_z.set_ylabel('% of critical')
+        for a in (ax_f, ax_z):
+            a.legend(fontsize=7, ncol=2, loc='upper right')
+            a.grid(True, alpha=0.3)
+            if j == nm - 1:
+                a.set_xlabel('time, s')
+    if nm == 0:
+        ax_p.set_xlabel('time, s')
+    fig.suptitle(f"{label}: modes against time, sweep with the input "
+                 f"history in each fit", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+
+
 def plot_orders(orders, save_path):
     """Model order supported by each record, for each neighbour choice."""
     import matplotlib.pyplot as plt
@@ -240,6 +371,8 @@ def main(only=None):
             orders[label] = table(label, res[label], base)
         plot_record(label, res[label], base,
                     OUT / f"sweep_{slug(label)}.png")
+        plot_time(label, res[label], base,
+                  OUT / f"sweep_time_{slug(label)}.png")
     plot_orders(orders, OUT / 'sweep_orders.png')
     (OUT / 'tables.txt').write_text(text.getvalue())
     print(text.getvalue())
