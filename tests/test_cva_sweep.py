@@ -132,3 +132,12 @@ def test_mode_shapes_with_one_state(linear, linear_run):
         assert ms.plot_regime_comparison() is None
     cm = ms.cluster_modes[0]
     assert cm is not None and len(cm.freq) >= 5
+
+
+def test_order_report(linear_run):
+    """A linear record supports two states per mode; against itself as
+    baseline there is no excess."""
+    o = linear_run.order_report(baseline=linear_run, verbose=False)
+    assert o['order'] == 12 and o['locked'] == 12
+    assert o['excess'] == 0 and o['quiet'] == o['loud'] == 12
+    assert linear_run.order_report(baseline=8, verbose=False)['excess'] == 4

@@ -125,6 +125,8 @@ class CVAWindowResult:
     spast:       np.ndarray
     sfuture:     np.ndarray
     indpast:     np.ndarray
+    rank_auto:   int = 0       # order this window's data supports at tol,
+                               # whatever order was locked (0 = not recorded)
 
 
 # =============================================================================
@@ -587,9 +589,38 @@ class CVARun:
                 progress_cb(done, n_eval, el, eta)
 
         # ----------------------------------------------------------
-        # Determine ranklock from first window (serial)
+        # Model order. If not given, the median of what a spread of
+        # windows supports. (It used to be whatever the first window
+        # supported, which on many records is a quiet or untypical
+        # stretch, and every later fit was then held to that order.)
         # ----------------------------------------------------------
         ranklock = cfg.ranklock
+        if ranklock == 0:
+            pick = np.unique(np.linspace(0, n_eval - 1,
+                                         min(25, n_eval)).astype(int))
+            found = []
+            for i in pick:
+                if _stop_requested():
+                    raise InterruptedError('CVA sweep stopped while '
+                                           'choosing the model order')
+                kw = win_indices[i]
+                try:
+                    r = cvaonestep(
+                        self.past_db, self.future_db, self.inputd,
+                        self.past_db[kw:kw+1, :],
+                        self.future_db[kw:kw+1, :],
+                        self.inputd[kw+lags:kw+lags+1, :],
+                        kw + lags + 2,      # any value but 1: no state reset
+                        cfg.tol, cfg.neighbors, 1,
+                        indpast=self.neighbor_indices(kw), **step_kw)
+                    found.append(r['rank_auto'])
+                except Exception as e:
+                    warnings.warn(f'Order check at window {kw} failed: {e}')
+            if found:
+                ranklock = max(1, int(np.median(found)))
+                print(f'  Model order: {ranklock}  (median supported by '
+                      f'{len(found)} windows across the record; range '
+                      f'{min(found)} to {max(found)})')
         kw0 = win_indices[0]
         inow0 = kw0 + lags
         try:
@@ -601,7 +632,7 @@ class CVARun:
                 1,   # inow=1 triggers rank determination
                 cfg.tol, cfg.neighbors, ranklock,
                         indpast=self.neighbor_indices(kw0), **step_kw)
-            if ranklock == 0:
+            if ranklock == 0:          # the order check found nothing
                 ranklock = int(r0['rank'])
                 print(f'  Rank determined from window 0: {ranklock}')
             # Store window 0 result
@@ -617,6 +648,7 @@ class CVARun:
                 spast       = r0['spast'],
                 sfuture     = r0['sfuture'],
                 indpast     = r0['indpast'],
+                rank_auto   = int(r0['rank_auto']),
             ))
         except Exception as e:
             warnings.warn(f'Window 0 failed: {e}')
@@ -654,6 +686,7 @@ class CVARun:
                         spast       = result['spast'],
                         sfuture     = result['sfuture'],
                         indpast     = result['indpast'],
+                        rank_auto   = int(result['rank_auto']),
                     ))
                 except Exception as e:
                     warnings.warn(f'Window {kw} failed: {e}')
@@ -711,7 +744,8 @@ class CVARun:
                             result['J'][:rnk, :],
                             result['spast'],
                             result['sfuture'],
-                            result['indpast'])
+                            result['indpast'],
+                            int(result['rank_auto']))
                 except Exception as e:
                     warnings.warn(f'Window {kw} failed: {e}')
                     return None
@@ -726,7 +760,8 @@ class CVARun:
             for res in raw:
                 if res is None:
                     continue
-                kw, inow, t, rnk, ev, Phi, Jnow, spast, sfuture, indpast = res
+                (kw, inow, t, rnk, ev, Phi, Jnow, spast, sfuture, indpast,
+                 rauto) = res
                 self.windows.append(CVAWindowResult(
                     window_idx  = int(kw),
                     sample_idx  = int(inow),
@@ -738,6 +773,7 @@ class CVARun:
                     spast       = spast,
                     sfuture     = sfuture,
                     indpast     = indpast,
+                    rank_auto   = rauto,
                 ))
 
             # Sort windows by index so downstream code stays consistent
@@ -750,6 +786,66 @@ class CVARun:
 
         print(f'\nDone. {len(self.windows)} windows in '
               f'{time.time()-t_start:.1f}s')
+        self.order_report()
+
+    # ------------------------------------------------------------------
+    # order_report
+    # ------------------------------------------------------------------
+    def order_report(self, baseline=None, verbose: bool = True) -> dict:
+        """
+        The model order each window's own data supports at `tol`, as an
+        indicator of nonlinearity.
+
+        With the input history in the fit, a linear structure needs two
+        states per excited mode and no more. Response the input does not
+        account for (harmonics, modes rung above the excitation band,
+        impacts) needs extra states, so the supported order rises. Compare
+        with a record of the same structure known to be linear, at the same
+        lags, tol and neighbours.
+
+        baseline : a CVARun of the linear record, or its order as a number.
+
+        Returns dict: order (median), lo, hi (10th and 90th percentile),
+        locked (the order the fits used), quiet and loud (median order in
+        the quietest and loudest third of windows), baseline, excess.
+        """
+        ra = np.array([w.rank_auto for w in self.windows])
+        ra = ra[ra > 0]
+        if len(ra) == 0:
+            if verbose:
+                print('  Supported order was not recorded for this run.')
+            return {}
+        out = dict(order=float(np.median(ra)),
+                   lo=float(np.percentile(ra, 10)),
+                   hi=float(np.percentile(ra, 90)),
+                   locked=int(np.median([w.rank for w in self.windows])))
+        if self.past_db is not None and self.datout is not None:
+            lev = self.window_level()[[w.window_idx for w in self.windows
+                                       if w.rank_auto > 0]]
+            q1, q2 = np.quantile(lev, [1 / 3, 2 / 3])
+            out['quiet'] = float(np.median(ra[lev <= q1]))
+            out['loud'] = float(np.median(ra[lev >= q2]))
+        if baseline is not None:
+            b = (baseline.order_report(verbose=False).get('order', np.nan)
+                 if hasattr(baseline, 'order_report') else float(baseline))
+            out['baseline'] = b
+            out['excess'] = out['order'] - b
+        if verbose:
+            print(f"  Model order the data supports : {out['order']:.0f} "
+                  f"(10th to 90th percentile {out['lo']:.0f} to "
+                  f"{out['hi']:.0f}); fits used {out['locked']}")
+            if 'quiet' in out:
+                print(f"    quietest third of windows {out['quiet']:.0f}, "
+                      f"loudest third {out['loud']:.0f}")
+            if 'baseline' in out:
+                if out['excess'] >= max(2.0, 0.25 * out['baseline']):
+                    msg = ('more states than the linear record needs: '
+                           'response the input does not account for')
+                else:
+                    msg = 'no more states than the linear record needs'
+                print(f"    linear baseline {out['baseline']:.0f}, excess "
+                      f"{out['excess']:+.0f}: {msg}")
+        return out
 
     # ------------------------------------------------------------------
     # compute_one_step_error
@@ -1480,6 +1576,7 @@ class CVARun:
                 wg.attrs['sample_idx'] = wr.sample_idx
                 wg.attrs['time']       = wr.time
                 wg.attrs['rank']       = wr.rank
+                wg.attrs['rank_auto']  = wr.rank_auto
                 wg.create_dataset('eigenvalues_real',
                                   data=np.real(wr.eigenvalues))
                 wg.create_dataset('eigenvalues_imag',
@@ -1567,7 +1664,8 @@ class CVARun:
                     Jnow        = Jnow,
                     spast       = w['spast'][:],
                     sfuture     = w['sfuture'][:],
-                    indpast     = w['indpast'][:]))
+                    indpast     = w['indpast'][:],
+                    rank_auto   = int(w.attrs.get('rank_auto', 0))))
 
             if 'significance' in f:
                 sig = {}

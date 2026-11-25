@@ -200,7 +200,9 @@ def cvaonestep(
         n_input_terms : int              input regressors used (0 if none)
         J        : (n_Ug, n_Vpr)        canonical variate projection
         L        : (rank, *)             future projection matrix
-        rank     : int                   system order
+        rank     : int                   system order used
+        rank_auto: int                   order this window's own data
+                                         supports at `tol`, whatever the lock
         spast    : (neighbors, rank)     state estimates from past
         sfuture  : (neighbors, rank)     state estimates from future
         indpast  : (neighbors,)          neighbor indices into past/future
@@ -451,6 +453,7 @@ def cvaonestep(
         'J':       J,
         'L':       L,
         'rank':    rnk,
+        'rank_auto': int(min(rankpast, rankfuture, grank)),
         'spast':   spast_n,
         'sfuture': sfuture_n,
         'indpast': indpast,

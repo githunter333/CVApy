@@ -200,6 +200,29 @@ The input history is cut short automatically if it would need more than a
 quarter of the neighbours (several inputs with long windows). Result files
 written before this option load as `use_input=False`.
 
+### Model order as an indicator
+
+With the input history in the fit, a linear structure needs two states per
+excited mode and no more. Response the input does not account for
+(harmonics, modes rung above the excitation band, impacts) needs extra
+states. Each window records the order its own data supports at `tol`
+(`rank_auto`), and `run.order_report(baseline=linear_run)` prints the
+median, its spread, the quietest and loudest thirds of the record, and the
+excess over a linear record of the same structure. Compare only runs with
+the same `lags`, `tol` and `neighbors`.
+
+When `ranklock` is 0 the fits use the median order supported by 25 windows
+spread across the record. (It used to be whatever the first window
+supported.)
+
+`run_r6dof_sweep.py` runs the sweep on the simulated six-mass records with
+all three neighbour choices and writes tables and figures to
+`results/sweep/`: order against the linear baseline, each mode against
+response level, and how often each mode is found from quiet to loud
+windows. A mode that moves more than `match_tol` (3%) from its median
+frequency drops out of its track, so a strongly hardening mode shows as
+"found" less often at high level.
+
 ### How the regimes are found
 
 Each window's Φ is in that window's own state basis, so the entries of two Φ
