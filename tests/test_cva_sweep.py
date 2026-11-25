@@ -141,3 +141,27 @@ def test_order_report(linear_run):
     assert o['order'] == 12 and o['locked'] == 12
     assert o['excess'] == 0 and o['quiet'] == o['loud'] == 12
     assert linear_run.order_report(baseline=8, verbose=False)['excess'] == 4
+
+
+def test_modal_history_rebuilds_the_response(linear_run):
+    cl = _cluster(linear_run)
+    h = cl.modal_history()
+    y, m = h['measured'], h['modal']
+    assert m.shape == (len(y), len(cl.ref_freq), y.shape[1])
+    assert len(h['time']) == len(y)
+    ok = np.isfinite(h['fitted'][:, 0])
+    assert ok.mean() > 0.95
+    # the tracked modes, with the response to the input over the last
+    # block, are the measured response
+    total = np.nansum(m, axis=1) + h['direct']
+    resid = ((y - total)[ok] ** 2).sum() / (y[ok] ** 2).sum()
+    assert resid < 0.02
+    assert (np.nansum(m, axis=1)[ok] ** 2).sum() > 0.5 * (y[ok] ** 2).sum()
+    # and each mode's part oscillates at that mode's frequency
+    fs = linear_run.fs
+    for j, f0 in enumerate(cl.ref_freq):
+        c = int(np.argmax(np.nanstd(m[:, j], axis=0)))
+        x = np.nan_to_num(m[:, j, c])
+        spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+        fpk = np.fft.rfftfreq(len(x), 1 / fs)[int(np.argmax(spec))]
+        assert abs(fpk - f0) < 0.02 * f0

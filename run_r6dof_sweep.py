@@ -16,8 +16,10 @@ time, level) and reports:
   * each mode's shift from the linear record's, poles the linear record
     does not have, and at what level they appear;
   * one state or two;
-  * against time: level, order, every pole, and each mode's frequency and
-    damping (sweep_time_<record>.png).
+  * against time, one graph per mode: frequency and damping
+    (sweep_time_<record>.png) and the mode's rebuilt acceleration
+    (sweep_modal_<record>.png); level, order and every pole are on
+    sweep_time_detail_<record>.png.
 
 A mode is tracked when its pole is in PERSISTENCE (20%) of the windows.
 
@@ -199,7 +201,7 @@ def plot_record(label, res, base, save_path):
     plt.close(fig)
 
 
-def plot_time(label, res, base, save_path, pole_mode='time'):
+def plot_time_detail(label, res, base, save_path, pole_mode='time'):
     """Per record, against time: response level, the order each window
     supports, every pole found, and each tracked mode's frequency and
     damping for the three neighbour choices."""
@@ -323,6 +325,113 @@ def plot_time(label, res, base, save_path, pole_mode='time'):
     plt.close(fig)
 
 
+def plot_time(label, res, base, save_path, mode='time'):
+    """Per record, one graph for each tracked mode: frequency (left axis,
+    Hz) and damping (right axis, % of critical) against time in seconds."""
+    import matplotlib.pyplot as plt
+    r = res[mode]
+    cl = r['cl']
+    nm = len(cl.ref_freq)
+    if nm == 0:
+        return
+    t = np.array([r['run'].windows[w].time for w in cl.use_idx])
+    bc = None if base is None else base[1][mode]['cl']
+    fig, axes = plt.subplots(nm, 1, figsize=(13, 2.7 * nm + 1.0),
+                             sharex=True, squeeze=False)
+
+    def limits(v, ref=None):
+        lo, hi = np.nanpercentile(v, [1, 99])
+        if ref is not None:
+            lo, hi = min(lo, ref), max(hi, ref)
+        pad = 0.15 * (hi - lo) + 1e-9 + 1e-4 * abs(hi)
+        return lo - pad, hi + pad
+
+    for j, ax in enumerate(axes[:, 0]):
+        f, z = cl.track_freq[:, j], 100 * cl.track_zeta[:, j]
+        f0 = cl.ref_freq[j]
+        fb = zb = None
+        if bc is not None and len(bc.ref_freq):
+            k = int(np.argmin(np.abs(bc.ref_freq - f0)))
+            if abs(bc.ref_freq[k] - f0) < 0.03 * f0:
+                fb = bc.ref_freq[k]
+                zb = 100 * np.nanmedian(bc.track_zeta[:, k])
+        cf, cz = 'tab:blue', 'tab:red'
+        hf, = ax.plot(t, f, '.-', color=cf, ms=3, lw=0.6,
+                      label=f"frequency: {np.nanmedian(f):.2f} "
+                            f"± {np.nanstd(f):.3g} Hz")
+        ax.set_ylim(*limits(f, fb))
+        ax.set_ylabel('frequency, Hz', color=cf)
+        ax.tick_params(axis='y', colors=cf)
+        ax.ticklabel_format(axis='y', useOffset=False)
+        az = ax.twinx()
+        hz, = az.plot(t, z, '.-', color=cz, ms=3, lw=0.6, alpha=0.8,
+                      label=f"damping: {np.nanmedian(z):.2f} "
+                            f"± {np.nanstd(z):.2g} %")
+        lo, hi = limits(z, zb)
+        az.set_ylim(min(lo, 0), hi)
+        az.set_ylabel('damping, % of critical', color=cz)
+        az.tick_params(axis='y', colors=cz)
+        hs = [hf, hz]
+        if fb is not None:
+            hs.append(ax.axhline(fb, color=cf, ls='--', lw=1.0,
+                                 label=f"{base[0]} record frequency: "
+                                       f"{fb:.2f} Hz"))
+            hs.append(az.axhline(zb, color=cz, ls='--', lw=1.0,
+                                 label=f"{base[0]} record damping: "
+                                       f"{zb:.2f} %"))
+        ax.legend(handles=hs, fontsize=8, ncol=4, loc='upper right')
+        ax.set_title(f"mode near {f0:.1f} Hz, found in "
+                     f"{100 * np.isfinite(f).mean():.0f}% of windows "
+                     f"(gaps: not found)", fontsize=10, loc='left')
+        ax.grid(True, alpha=0.3)
+    axes[-1, 0].set_xlabel('time, s')
+    fig.suptitle(f"{label}: frequency and damping of each mode against "
+                 f"time (neighbours by {mode})", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+
+
+def plot_modal(label, res, save_path, mode='time'):
+    """Per record, one graph for each tracked mode: the mode's rebuilt
+    acceleration against time, at the mass where the mode is largest."""
+    import matplotlib.pyplot as plt
+    cl = res[mode]['cl']
+    nm = len(cl.ref_freq)
+    if nm == 0:
+        return None
+    h = cl.modal_history()
+    t, m, y = h['time'], h['modal'], h['measured']
+    ok = np.isfinite(h['fitted'][:, 0])
+    total = np.nansum(m, axis=1)
+    share = 100 * (1 - ((y - total)[ok] ** 2).sum() / (y[ok] ** 2).sum())
+    fig, axes = plt.subplots(nm, 1, figsize=(13, 2.5 * nm + 1.0),
+                             sharex=True, squeeze=False)
+    for j, ax in enumerate(axes[:, 0]):
+        rms = np.sqrt(np.nanmean(m[:, j] ** 2, axis=0))
+        c = int(np.argmax(rms))
+        found = 100 * np.isfinite(m[:, j, c]).mean()
+        ax.plot(t, m[:, j, c], color='tab:blue', lw=0.3, rasterized=True,
+                label=f"rebuilt acceleration of this mode at mass {c + 1}: "
+                      f"rms {rms[c]:.3g} "
+                      f"(measured at mass {c + 1}: rms {y[:, c].std():.3g})")
+        ax.set_ylabel('acceleration')
+        ax.set_title(f"mode near {cl.ref_freq[j]:.1f} Hz at mass {c + 1}, "
+                     f"where it is largest; found {found:.0f}% of the time "
+                     f"(gaps: not found)", fontsize=10, loc='left')
+        ax.legend(fontsize=8, loc='upper right')
+        ax.grid(True, alpha=0.3)
+    axes[-1, 0].set_xlabel('time, s')
+    fig.suptitle(f"{label}: rebuilt modal acceleration against time "
+                 f"(neighbours by {mode}). The tracked modes together "
+                 f"give {share:.1f}% of the measured response",
+                 fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    return share
+
+
 def plot_orders(orders, save_path):
     """Model order supported by each record, for each neighbour choice."""
     import matplotlib.pyplot as plt
@@ -373,6 +482,9 @@ def main(only=None):
                     OUT / f"sweep_{slug(label)}.png")
         plot_time(label, res[label], base,
                   OUT / f"sweep_time_{slug(label)}.png")
+        plot_time_detail(label, res[label], base,
+                         OUT / f"sweep_time_detail_{slug(label)}.png")
+        plot_modal(label, res[label], OUT / f"sweep_modal_{slug(label)}.png")
     plot_orders(orders, OUT / 'sweep_orders.png')
     (OUT / 'tables.txt').write_text(text.getvalue())
     print(text.getvalue())

@@ -252,6 +252,91 @@ class CVAPhiCluster:
                   f'{100*np.nanmedian(Z[:, j]):7.3f} +- '
                   f'{100*np.nanstd(Z[:, j]):<6.3f}')
 
+    def modal_history(self):
+        """Each tracked mode's part of the measured response, sample by
+        sample.
+
+        A window's model is applied to the samples nearest that window in
+        time. There the state is x = Jnow @ past, the response at the newest
+        sample of the past block is fitted as y = C x over the window's
+        neighbours (with a term D u for the input over the length of the
+        past block, which the state does not carry), and with Phi = V diag(ev) inv(V) the state splits into
+        modal coordinates q = inv(V) x. Mode j (a conjugate pair) then
+        contributes 2 Re(C v_j q_j) to the response; this does not depend on
+        how the states or eigenvectors are scaled.
+
+        Returns dict:
+          time   (N,)               time of each sample
+          modal  (N, n_modes, n_out) contribution of each tracked mode at
+                                    each channel, NaN where the mode is not
+                                    found in that window
+          direct (N, n_out)         D u, the response to the input over the
+                                    last `lags` samples; small for lightly
+                                    damped modes, larger when a mode's decay
+                                    time is comparable to the block length
+          fitted (N, n_out)         C x + D u, every state included
+          measured (N, n_out)       the response at the same samples
+        """
+        if self.track_pole is None:
+            raise RuntimeError('Call fit() first')
+        run = self.run
+        lags, n_out = run.cfg.lags, run.n_out
+        nc = n_out * lags
+        N = run.past_db.shape[0]
+        nm = len(self.ref_freq)
+        k0 = np.array([run.windows[w].window_idx for w in self.use_idx])
+        order = np.argsort(k0)
+        edges = np.concatenate([[0], (k0[order][:-1] + k0[order][1:]) // 2,
+                                [N]])
+        modal = np.full((N, nm, n_out), np.nan)
+        fitted = np.full((N, n_out), np.nan)
+        direct = np.zeros((N, n_out))
+        U = None
+        if getattr(run, 'inputd', None) is not None:
+            # input history ending at each sample: u(n), u(n-1), ...
+            u = np.asarray(run.inputd, float).reshape(len(run.datout), -1)
+            m = max(1, min(lags, run.cfg.neighbors // (4 * u.shape[1])))
+            U = np.zeros((len(u), m * u.shape[1]))
+            for k in range(m):
+                U[k:, k * u.shape[1]:(k + 1) * u.shape[1]] = u[:len(u) - k]
+            U = U / (U.std(axis=0) + 1e-300)
+        for a, ii in enumerate(order):
+            wr = run.windows[self.use_idx[ii]]
+            lo, hi = int(edges[a]), int(edges[a + 1])
+            if hi <= lo or wr.rank == 0:
+                continue
+            newest = np.asarray(wr.indpast) + lags - 1
+            ok = (newest >= 0) & (newest < run.datout.shape[0])
+            if ok.sum() <= wr.rank:
+                continue
+            A = wr.spast[ok]
+            if U is not None:
+                A = np.hstack([A, U[newest[ok]]])
+            CD = np.linalg.lstsq(A, run.datout[newest[ok]], rcond=None)[0].T
+            C = CD[:, :wr.rank]                             # (n_out, rank)
+            X = run.past_db[lo:hi] @ wr.Jnow[:, :nc].T      # (n, rank)
+            fitted[lo:hi] = X @ C.T
+            if U is not None:
+                direct[lo:hi] = U[lo + lags - 1:hi + lags - 1] @ CD[:, wr.rank:].T
+                fitted[lo:hi] += direct[lo:hi]
+            ev, V = np.linalg.eig(wr.Phi)
+            try:
+                Q = X @ np.linalg.inv(V).T                  # (n, rank)
+            except np.linalg.LinAlgError:
+                continue
+            for j in range(nm):
+                pole = self.track_pole[ii, j]
+                if not np.isfinite(pole):
+                    continue
+                g = int(np.argmin(np.abs(ev - pole)))
+                modal[lo:hi, j, :] = 2.0 * np.real(
+                    np.outer(Q[:, g], C @ V[:, g]))
+        rows = np.arange(N) + lags - 1
+        t = (np.asarray(run.time)[rows] if getattr(run, 'time', None)
+             is not None else rows / run.fs)
+        return dict(time=t, modal=modal, fitted=fitted, direct=direct,
+                    measured=run.datout[rows])
+
     def _features(self):
         """Phi_vec: percent deviation of each mode's frequency from its
         median (gaps filled with 0). Phi_pca: its principal components."""

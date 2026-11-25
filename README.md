@@ -219,8 +219,13 @@ supported.)
 all three neighbour choices and writes tables and figures to
 `results/sweep/`: order against the linear baseline, each mode against
 response level, how often each mode is found from quiet to loud
-windows, and (`sweep_time_<record>.png`) level, order, every pole and each
-mode's frequency and damping against time. The script tracks a mode when
+windows. Against time it draws one graph per mode: frequency and damping
+(`sweep_time_<record>.png`) and the mode's rebuilt acceleration at the
+mass where it is largest (`sweep_modal_<record>.png`, from
+`CVAPhiCluster.modal_history()`, which splits each window's state into
+modal coordinates and returns every tracked mode's part of the measured
+response sample by sample). Level, order and every pole against time are
+on `sweep_time_detail_<record>.png`. The script tracks a mode when
 its pole is in 20% of the windows (`PERSISTENCE`; the tracker's own default
 is 50%), so bands that appear only at some levels get a track. A mode that moves more than `match_tol` (3%) from its median
 frequency drops out of its track, so a strongly hardening mode shows as
