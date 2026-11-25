@@ -151,6 +151,10 @@ def cvaonestep(
     tol:          float,
     neighbors:    int,
     ranklock:     int = 0,
+    lags:         int = 0,
+    use_input:    bool = False,
+    input_lags:   int = -1,
+    indpast:      np.ndarray = None,
 ) -> dict:
     """
     One-step local Canonical Variate Analysis for system identification.
@@ -168,12 +172,32 @@ def cvaonestep(
     tol         : float                        — SVD rank tolerance
     neighbors   : int                          — number of nearest neighbors
     ranklock    : int                          — 0 = auto rank; >0 = locked rank
+    lags        : int                          — samples in each past window;
+                                                 0 = inputd rows - past rows
+    use_input   : bool                         — False: the original fit. One
+                  input sample is appended to the past and future blocks and
+                  Phi is the output-only transition.
+                  True: the input history over each neighbour's window,
+                  u(k+1), u(k), ..., u(k+1-input_lags) with k+1 the newest
+                  future sample, is removed from the past and future blocks
+                  before the covariances are formed, and Phi is fitted as
+                  s(k+1) = Phi s(k) + G [input history]. The poles of Phi are
+                  then those of the structure, not of the structure as driven
+                  by an input the model cannot see.
+    input_lags  : int                          — input samples before u(k+1)
+                                                 to use; -1 = lags
+    indpast     : (neighbors,) int or None     — rows of past/future to fit
+                  from, chosen by the caller (nearest in time, in level,
+                  ...). None = the nearest neighbours of querypast.
 
     Returns
     -------
     dict with keys:
         Phi      : (rank, rank)          state transition matrix
         Phi1     : (rank, rank)          state transition with input
+                                         (same as Phi when use_input is True)
+        Phi_auto : (rank, rank)          output-only transition
+        n_input_terms : int              input regressors used (0 if none)
         J        : (n_Ug, n_Vpr)        canonical variate projection
         L        : (rank, *)             future projection matrix
         rank     : int                   system order
@@ -212,41 +236,74 @@ def cvaonestep(
     # ------------------------------------------------------------------
     # 2. Find nearest neighbors
     # ------------------------------------------------------------------
-    nn_model = NearestNeighbors(n_neighbors=neighbors + 1,
-                                algorithm='auto', metric='euclidean')
-    nn_model.fit(past)
-    _, idx = nn_model.kneighbors(querypast)   # idx: (1, neighbors+1)
-    idx = idx[0]                               # flatten to 1D
+    if indpast is not None:
+        indpast = np.asarray(indpast, dtype=int)
+    else:
+        nn_model = NearestNeighbors(n_neighbors=neighbors + 1,
+                                    algorithm='auto', metric='euclidean')
+        nn_model.fit(past)
+        _, idx = nn_model.kneighbors(querypast)   # idx: (1, neighbors+1)
+        idx = idx[0]                               # flatten to 1D
 
-    # Skip first match (self) — same as MATLAB idx(2:end)
-    indpast = idx[1:]    # shape: (neighbors,)
+        # Skip first match (self) — same as MATLAB idx(2:end)
+        indpast = idx[1:]    # shape: (neighbors,)
 
     # ------------------------------------------------------------------
     # 3. Extract neighborhood data
     # ------------------------------------------------------------------
     pneighborsw = past[indpast, :]      # (neighbors, nout*lags)
     fneighborsw = future[indpast, :]    # (neighbors, nout*lags)
-    ineighbors  = inputd[indpast, :]    # (neighbors, nin)
+    nin = inputd.shape[1]
 
-    # Future input (next sample) — guard against index out of bounds
-    indpast_p1  = np.minimum(indpast + 1, inputd.shape[0] - 1)
-    ineighborsf = inputd[indpast_p1, :]  # (neighbors, nin)
+    if use_input:
+        # --------------------------------------------------------------
+        # 4a. Input history aligned with each neighbour's window.
+        # Row i of `past` holds samples i .. i+lags-1 and row i of `future`
+        # holds i+1 .. i+lags, so the newest future sample is i+lags.
+        # --------------------------------------------------------------
+        if not lags:
+            lags = inputd.shape[0] - past.shape[0]
+        m = lags if input_lags < 0 else min(int(input_lags), lags)
+        newest = np.minimum(indpast + lags, inputd.shape[0] - 1)
+        uhist = np.hstack([inputd[np.maximum(newest - j, 0), :]
+                           for j in range(m + 1)])
+        scale = np.sqrt(np.mean(uhist ** 2, axis=0))
+        uhist = uhist[:, scale > 0] / scale[scale > 0]
 
-    # Uniform weighting (matches MATLAB ones())
-    # neighborswindow = np.ones(neighbors)  # placeholder for future weighting
+        # Remove what the input history explains from both blocks
+        both = np.hstack([pneighborsw, fneighborsw])
+        both = both - uhist @ lstsq(uhist, both)[0]
+        ncp = pneighborsw.shape[1]
+        pfit, ffit = both[:, :ncp], both[:, ncp:]
 
-    # ------------------------------------------------------------------
-    # 4. Append input to past/future blocks
-    # ------------------------------------------------------------------
-    pneighbors = np.hstack([pneighborsw, ineighbors])   # (neighbors, nout*lags+nin)
-    fneighbors = np.hstack([fneighborsw, ineighborsf])  # (neighbors, nout*lags+nin)
+        # States are projections of the measured blocks. The zero columns
+        # keep J the width callers expect: [past window, one input sample].
+        zeros_in = np.zeros((len(indpast), nin))
+        pneighbors = np.hstack([pneighborsw, zeros_in])
+        fneighbors = np.hstack([fneighborsw, zeros_in])
+        pfit = np.hstack([pfit, zeros_in])
+        ffit = np.hstack([ffit, zeros_in])
+    else:
+        ineighbors  = inputd[indpast, :]    # (neighbors, nin)
+
+        # Future input (next sample) — guard against index out of bounds
+        indpast_p1  = np.minimum(indpast + 1, inputd.shape[0] - 1)
+        ineighborsf = inputd[indpast_p1, :]  # (neighbors, nin)
+
+        # --------------------------------------------------------------
+        # 4. Append input to past/future blocks
+        # --------------------------------------------------------------
+        pneighbors = np.hstack([pneighborsw, ineighbors])   # (neighbors, nout*lags+nin)
+        fneighbors = np.hstack([fneighborsw, ineighborsf])  # (neighbors, nout*lags+nin)
+        pfit, ffit = pneighbors, fneighbors
+        uhist = None
 
     # ------------------------------------------------------------------
     # 5. Covariance matrices
     # ------------------------------------------------------------------
-    Spp = pneighbors.T @ pneighbors
-    Sff = fneighbors.T @ fneighbors
-    Spf = pneighbors.T @ fneighbors
+    Spp = pfit.T @ pfit
+    Sff = ffit.T @ ffit
+    Spf = pfit.T @ ffit
 
     # Tikhonov regularization
     reg_p = 1e-8 * np.trace(Spp) / Spp.shape[0]
@@ -353,16 +410,35 @@ def cvaonestep(
     if np.any(np.isnan(Phi)) or np.any(np.isinf(Phi)):
         raise ValueError('Invalid Phi matrix (NaN or Inf)')
 
-    # With input: x(k+1) = Phi1 * [x(k); u(k)]
-    try:
-        pastninput = np.hstack([spast_n, ineighborsf[:, -1:]])
-        reg1 = 1e-6 * np.trace(pastninput.T @ pastninput) / pastninput.shape[1]
-        A1   = pastninput.T @ pastninput + reg1 * np.eye(pastninput.shape[1])
-        B1   = pastninput.T @ sfuture_n
-        Phig = np.linalg.solve(A1, B1).T
-        Phi1 = Phig[:, :rnk]
-    except Exception:
-        Phi1 = Phi.copy()
+    Phi_auto = Phi
+
+    if use_input:
+        # With the input history: s(k+1) = Phi s(k) + G uhist
+        X  = np.hstack([spast_n, uhist])
+        d  = np.sqrt(np.mean(X ** 2, axis=0))
+        d[d == 0] = 1.0
+        Xs = X / d
+        A1 = Xs.T @ Xs
+        A1 += 1e-6 * np.trace(A1) / A1.shape[0] * np.eye(A1.shape[0])
+        try:
+            coef = np.linalg.solve(A1, Xs.T @ sfuture_n) / d[:, None]
+        except np.linalg.LinAlgError:
+            coef = lstsq(X, sfuture_n)[0]
+        Phi = coef[:rnk, :].T
+        if np.any(np.isnan(Phi)) or np.any(np.isinf(Phi)):
+            raise ValueError('Invalid Phi matrix (NaN or Inf)')
+        Phi1 = Phi
+    else:
+        # With input: x(k+1) = Phi1 * [x(k); u(k)]
+        try:
+            pastninput = np.hstack([spast_n, ineighborsf[:, -1:]])
+            reg1 = 1e-6 * np.trace(pastninput.T @ pastninput) / pastninput.shape[1]
+            A1   = pastninput.T @ pastninput + reg1 * np.eye(pastninput.shape[1])
+            B1   = pastninput.T @ sfuture_n
+            Phig = np.linalg.solve(A1, B1).T
+            Phi1 = Phig[:, :rnk]
+        except Exception:
+            Phi1 = Phi.copy()
 
     # ------------------------------------------------------------------
     # Return results as dict
@@ -370,6 +446,8 @@ def cvaonestep(
     return {
         'Phi':     Phi,
         'Phi1':    Phi1,
+        'Phi_auto': Phi_auto,
+        'n_input_terms': 0 if uhist is None else uhist.shape[1],
         'J':       J,
         'L':       L,
         'rank':    rnk,

@@ -2,8 +2,9 @@
 
 Local Canonical Variate Analysis (LCVA) for nonlinear structural system
 identification. Fits a local linear state-space model in each sliding window of
-a response record, then clusters the resulting Φ matrices to find distinct
-dynamical regimes and extracts physical mode shapes for each.
+a response record, tracks the modes of those models from window to window,
+tests whether the tracks show one dynamical regime or two, and extracts
+physical mode shapes for each.
 
 ## Environment
 
@@ -138,7 +139,7 @@ Sample record: `bltimedatashort.txt` (3001 samples, 17 outputs, 1 input, 3200 Hz
 | Stage | Class | Output |
 |---|---|---|
 | 1 | `CVARun` (`cva_run.py`) | windowed CVA, eigenvalue significance, prediction error → `<stem>_cva.h5` |
-| 2 | `CVAPhiCluster` (`cva_phi_cluster.py`) | PCA → elbow → k-means on Φ → `<stem>_clusters.h5` |
+| 2 | `CVAPhiCluster` (`cva_phi_cluster.py`) | mode tracks → one state or two → `<stem>_clusters.h5` |
 | 3 | `CVAModeShapes` (`cva_mode_shapes.py`) | physical mode shapes per cluster → `<stem>_modes.h5` |
 
 `cva_core.py` holds the MATLAB translation (`delaybuild`, `reduce_matrix`,
@@ -155,13 +156,69 @@ set `RUN_CVA` / `RUN_CLUSTER` / `RUN_MODES` to `False`.
 |---|---|
 | `lags` | window length in samples. 16 = fast, 64 = better frequency resolution |
 | `tol` | SVD rank tolerance. 1e-3 loose, 1e-4 recommended, 5e-5 tight |
-| `neighbors` | nearest neighbours per local fit. 200 fast, 960 better conditioned |
+| `neighbors` | windows used in each local fit. 200 fast, 960 better conditioned |
+| `neighbor_mode` | how those windows are chosen: `shape`, `time` or `level` (below) |
+| `use_input` | `True` (default) fits each local model with the input history; `False` is the original output-only fit |
 | `eval_stride` | evaluate every Nth window. 1 = every window |
 | `decimate` | 1 = none. Applied before the window; divides fs |
 | `t_start` / `t_end` | analysis window in seconds. None = the whole record |
 | `n_jobs` | 1 = serial, -1 = all cores (verified bit-identical to serial) |
 | `f_min` / `f_max` | frequency band for clustering and mode shapes |
-| `n_clusters` | 0 = auto-detect via elbow |
+| `n_clusters` | 0 = decided by the regime test (one or two); k > 0 forces k groups |
+
+### What each local model is fitted from
+
+`neighbor_mode` sets which windows of the record go into the model at each
+point of the sweep. All three use `neighbors` windows.
+
+| choice | windows used | suits |
+|---|---|---|
+| `shape` | those whose response history looks most like the current one, anywhere in the record (the original choice) | behaviour that depends on the instantaneous motion |
+| `time` | those nearest in time | a structure that changes during the record: something working loose, a joint that switches state |
+| `level` | those at the nearest response level (rms over `level_sec`, default 4 × `lags` samples), anywhere in the record | stiffness or damping that depends on amplitude |
+
+On a simulated chain whose joint switches between two states every few
+seconds, only `time` separates the states; `shape` and `level` each mix the
+two and report the average.
+
+### The input in the fit
+
+With `use_input=True` the input over each window, aligned sample for sample
+with the responses, is removed from the past and future blocks before the
+canonical step and included in the fit of Φ. The poles of Φ are then those
+of the structure. The original fit appended a single input sample taken from
+the start of the window and stored the output-only Φ, so its poles were those
+of the structure driven by an input the model could not see.
+
+On a simulated linear six-mass chain (true third mode 471.49 Hz, 1.57%
+damping) the original fit gives 473.6 ± 3.8 Hz and 1.7 ± 2.0% from window to
+window; with the input history it gives 471.49 ± 0.02 Hz and 1.57 ± 0.003%,
+and the model order comes out as 12, twice the number of modes. That case is
+ideal (the input is known exactly); on measured records the gain is smaller.
+
+The input history is cut short automatically if it would need more than a
+quarter of the neighbours (several inputs with long windows). Result files
+written before this option load as `use_input=False`.
+
+### How the regimes are found
+
+Each window's Φ is in that window's own state basis, so the entries of two Φ
+matrices cannot be compared, and clustering them splits even a linear record
+into several groups. `CVAPhiCluster` now works on the frequencies of the
+modes that persist from window to window:
+
+1. reference modes are the frequencies at which at least half the windows
+   have a pole;
+2. each window's poles are matched to them, one frequency and damping track
+   per mode;
+3. each track, after its smooth trend with response level is removed, is
+   tested for two separate clusters (the test of `cva_regimes.py`:
+   separation of 3 or more, a clear gap, 15% of windows in each, at least
+   0.1% apart in frequency).
+
+A linear record, or one whose modes simply follow the level, reads as one
+state; `regime_B` is then the same cluster as `regime_A`. The "Regime test"
+page (`plot_elbow`) shows every mode's separation.
 
 ## Nonlinearity indicators from spectra
 

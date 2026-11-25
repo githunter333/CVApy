@@ -7,6 +7,10 @@ Classes: CVAConfig, CVAWindowResult, CVARun
 
 Changes from previous version
 ------------------------------
+- CVAConfig.use_input (default True): each local model is fitted with the
+  input history over its window, aligned with the responses. The earlier
+  fit appended one input sample taken from the start of the window and
+  stored the output-only transition; set use_input=False to reproduce it.
 - CVAWindowResult now stores Jnow (rank x ncols_past+nin) — rectangular
   state projector matching MATLAB's J(1:rk,:)
 - compute_one_step_error() — physical output one-step error per channel,
@@ -51,6 +55,27 @@ class CVAConfig:
     neighbors:              int   = 960
     ranklock:               int   = 0
     eval_stride:            int   = 1
+    neighbor_mode:          str   = 'shape'
+                                          # which windows each local model
+                                          # is fitted from:
+                                          # 'shape' : those whose response
+                                          #    history looks most like the
+                                          #    current one, anywhere in the
+                                          #    record (the original choice)
+                                          # 'time'  : those nearest in time
+                                          # 'level' : those at the nearest
+                                          #    response level, anywhere in
+                                          #    the record
+    level_sec:              float = 0.0   # 'level' only: span the response
+                                          # rms is taken over; 0 = 4 x lags
+    use_input:              bool  = True  # fit each local model with the
+                                          # input history over its window;
+                                          # False = the original output-only
+                                          # fit (as in the MATLAB version)
+    input_lags:             int   = -1    # input samples before the newest
+                                          # one in that history; -1 = lags,
+                                          # reduced if the neighbours cannot
+                                          # support that many terms
     fs:                     Optional[float] = None
     freq_min:               float = 0.0
     freq_max:               float = 0.0
@@ -125,6 +150,7 @@ class CVARun:
         self.n_win:     int = 0
         self.windows: List[CVAWindowResult] = []
         self.sig:     dict = {}
+        self._level = None
 
     # ------------------------------------------------------------------
     # load_data
@@ -425,8 +451,53 @@ class CVARun:
         self.past_db   = full[:-1, :]
         self.future_db = full[1:,  :]
         self.n_win     = self.past_db.shape[0]
+        self._level = None
         print(f'  Windows : {self.n_win}')
         print(f'  past_db : {self.past_db.shape}')
+
+    # ------------------------------------------------------------------
+    # neighbour choice
+    # ------------------------------------------------------------------
+    NEIGHBOR_MODES = ('shape', 'time', 'level')
+
+    def window_level(self):
+        """Response level at each window: rms over level_sec ending at the
+        window's newest sample, channels scaled to unit rms so that none
+        dominates. One value per row of past_db."""
+        if getattr(self, '_level', None) is None:
+            lags = self.cfg.lags
+            span = (int(round(self.cfg.level_sec * self.fs))
+                    if self.cfg.level_sec > 0 else 4 * lags)
+            span = max(span, 1)
+            y = self.datout / (self.datout.std(axis=0) + 1e-300)
+            c = np.concatenate([[0.0], np.cumsum(np.mean(y ** 2, axis=1))])
+            end = np.arange(self.n_win) + lags          # one past the newest
+            start = np.maximum(end - span, 0)
+            self._level = np.sqrt((c[end] - c[start]) / (end - start))
+            self._level_order = np.argsort(self._level, kind='stable')
+            self._level_pos = np.empty(self.n_win, dtype=int)
+            self._level_pos[self._level_order] = np.arange(self.n_win)
+        return self._level
+
+    def neighbor_indices(self, kw):
+        """Rows of the database the model at window kw is fitted from, or
+        None to let cvaonestep search by similarity of history."""
+        mode, n = self.cfg.neighbor_mode, self.cfg.neighbors
+        if mode == 'shape':
+            return None
+        if mode == 'time':
+            a = int(np.clip(kw - n // 2, 0, self.n_win - n - 1))
+            idx = np.arange(a, a + n + 1)
+            return idx[idx != kw][:n]
+        if mode == 'level':
+            lev = self.window_level()
+            pos = self._level_pos[kw]
+            cand = self._level_order[max(pos - n, 0):pos + n + 1]
+            cand = cand[cand != kw]
+            near = np.argpartition(np.abs(lev[cand] - lev[kw]), n - 1)[:n]
+            return np.sort(cand[near])
+        raise ValueError(f'neighbor_mode must be one of '
+                         f'{self.NEIGHBOR_MODES}, not {mode!r}')
 
     # ------------------------------------------------------------------
     # run
@@ -467,6 +538,30 @@ class CVARun:
         print(f'\nRunning CVA ...')
         print(f'  lags={lags}  tol={cfg.tol:.1e}  neighbors={cfg.neighbors}')
         print(f'  Windows to evaluate : {n_eval}  n_jobs={n_jobs}')
+        if cfg.neighbor_mode not in self.NEIGHBOR_MODES:
+            raise ValueError(f'neighbor_mode must be one of '
+                             f'{self.NEIGHBOR_MODES}, not {cfg.neighbor_mode!r}')
+        if cfg.neighbors >= self.n_win:
+            raise ValueError(f'neighbors ({cfg.neighbors}) must be less than '
+                             f'the number of windows ({self.n_win})')
+        print(f'  Neighbours chosen by : {cfg.neighbor_mode}')
+        if cfg.neighbor_mode == 'level':
+            self.window_level()        # before any worker thread needs it
+        step_kw = dict(lags=lags, use_input=bool(cfg.use_input))
+        if cfg.use_input:
+            # Keep the input terms to a quarter of the neighbours, so the
+            # input history never uses up the fit.
+            m_max = max(0, cfg.neighbors // (4 * max(self.n_in, 1)) - 1)
+            m = lags if cfg.input_lags < 0 else min(cfg.input_lags, lags)
+            if m > m_max:
+                print(f'  Input history cut from {m} to {m_max} samples: '
+                      f'{self.n_in} input(s), {cfg.neighbors} neighbours')
+                m = m_max
+            step_kw['input_lags'] = m
+            print(f'  Input history in each fit : {m + 1} samples x '
+                  f'{self.n_in} input(s)')
+        else:
+            print('  Input history in each fit : none (output-only fit)')
         self.windows = []
         reset_cva_state()
         t_start = time.time()
@@ -504,7 +599,8 @@ class CVARun:
                 self.future_db[kw0:kw0+1, :],
                 self.inputd[inow0:inow0+1, :],
                 1,   # inow=1 triggers rank determination
-                cfg.tol, cfg.neighbors, ranklock)
+                cfg.tol, cfg.neighbors, ranklock,
+                        indpast=self.neighbor_indices(kw0), **step_kw)
             if ranklock == 0:
                 ranklock = int(r0['rank'])
                 print(f'  Rank determined from window 0: {ranklock}')
@@ -544,7 +640,8 @@ class CVARun:
                         self.future_db[kw:kw+1, :],
                         self.inputd[inow:inow+1, :],
                         inow,
-                        cfg.tol, cfg.neighbors, ranklock)
+                        cfg.tol, cfg.neighbors, ranklock,
+                        indpast=self.neighbor_indices(kw), **step_kw)
                     rnk  = result['rank']
                     self.windows.append(CVAWindowResult(
                         window_idx  = int(kw),
@@ -605,7 +702,8 @@ class CVARun:
                         future_db[kw:kw+1, :],
                         inputd[inow:inow+1, :],
                         inow,
-                        cfg.tol, cfg.neighbors, ranklock)
+                        cfg.tol, cfg.neighbors, ranklock,
+                        indpast=self.neighbor_indices(kw), **step_kw)
                     rnk = result['rank']
                     return (kw, inow, float(time_vec[inow]), rnk,
                             np.linalg.eigvals(result['Phi']),
@@ -1348,6 +1446,10 @@ class CVARun:
             g.attrs['neighbors']   = self.cfg.neighbors
             g.attrs['ranklock']    = self.cfg.ranklock
             g.attrs['eval_stride'] = self.cfg.eval_stride
+            g.attrs['use_input']   = bool(self.cfg.use_input)
+            g.attrs['neighbor_mode'] = self.cfg.neighbor_mode
+            g.attrs['level_sec']   = self.cfg.level_sec
+            g.attrs['input_lags']  = self.cfg.input_lags
             g.attrs['fs']          = self.fs or 0.0
             g.attrs['freq_min']    = self.cfg.freq_min
             g.attrs['freq_max']    = self.cfg.freq_max
@@ -1417,6 +1519,12 @@ class CVARun:
                 neighbors   = int(ca['neighbors']),
                 ranklock    = int(ca['ranklock']),
                 eval_stride = int(ca['eval_stride']),
+                # files written before the input history was added
+                # hold output-only fits
+                use_input   = bool(ca.get('use_input', False)),
+                input_lags  = int(ca.get('input_lags', -1)),
+                neighbor_mode = str(ca.get('neighbor_mode', 'shape')),
+                level_sec   = float(ca.get('level_sec', 0.0)),
                 fs          = float(ca['fs']) or None,
                 freq_min    = float(ca['freq_min']),
                 freq_max    = float(ca['freq_max']),

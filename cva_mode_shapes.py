@@ -165,6 +165,8 @@ class CVAModeShapes:
 
     def plot_regime_comparison(self, save_path=None, dpi=150):
         clust = self.clust
+        if clust.regime_A == clust.regime_B:
+            print('One state: no second regime to compare.'); return
         mA    = self.cluster_modes[clust.regime_A]
         mB    = self.cluster_modes[clust.regime_B]
         if mA is None or mB is None:

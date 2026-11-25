@@ -104,6 +104,8 @@ TOL         = 1e-2
 NEIGHBORS   =1000
 RANKLOCK    = 0
 EVAL_STRIDE = 1
+NEIGHBOR_MODE = 'shape'   # 'shape', 'time' or 'level': see CVAConfig
+USE_INPUT   = True       # False = the original output-only fit
 # 0 = take the rate from the record's own time column, which is what most
 # records carry. A non-zero value OVERRIDES the time column and is reported
 # as a warning when the two disagree.
@@ -194,7 +196,8 @@ print('=' * 60)
 if RUN_CVA:
     print('\n--- Step 1: CVA Run ---')
     cfg = CVAConfig(lags=LAGS, tol=TOL, neighbors=NEIGHBORS,
-                    ranklock=RANKLOCK, eval_stride=EVAL_STRIDE, fs=FS)
+                    ranklock=RANKLOCK, eval_stride=EVAL_STRIDE, fs=FS,
+                    neighbor_mode=NEIGHBOR_MODE, use_input=USE_INPUT)
     run = CVARun(cfg)
 
     info = sniff_record(DATA_FILE)

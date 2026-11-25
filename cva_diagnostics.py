@@ -50,6 +50,8 @@ def plot_nonlinearity_localization(ms, clust, nl_ch_pair=(2, 3),
     dpi          : figure resolution
     """
     rA = clust.regime_A; rB = clust.regime_B
+    if rA == rB:
+        print('One state: no second regime to compare.'); return
     cmA = ms.cluster_modes[rA]; cmB = ms.cluster_modes[rB]
     if cmA is None or cmB is None:
         print('Cannot plot — one or both regimes have no modes.'); return
@@ -117,6 +119,8 @@ def plot_frequency_shift_summary(ms, clust, freq_max=0.0,
     dpi          : resolution
     """
     rA = clust.regime_A; rB = clust.regime_B
+    if rA == rB:
+        print('One state: no second regime to compare.'); return
     cmA = ms.cluster_modes[rA]; cmB = ms.cluster_modes[rB]
     if cmA is None or cmB is None:
         print('Cannot plot — one or both regimes have no modes.'); return
@@ -155,6 +159,8 @@ def print_modal_summary(ms, clust, freq_max=0.0):
     freq_max  : upper frequency limit (0=all)
     """
     rA = clust.regime_A; rB = clust.regime_B
+    if rA == rB:
+        print('One state: no second regime to compare.'); return
     cmA = ms.cluster_modes[rA]; cmB = ms.cluster_modes[rB]
     if cmA is None or cmB is None:
         print('One or both regimes have no modes.'); return

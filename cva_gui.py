@@ -172,7 +172,9 @@ class PipelineWorker(QObject):
                     ranklock=p['ranklock'], eval_stride=p['eval_stride'],
                     fs=p['fs'], freq_min=p['freq_min'], freq_max=p['freq_max'],
                     sig_threshold_fraction=p['sig_threshold_fraction'],
-                    sig_peak_mindist=p['sig_peak_mindist'])
+                    sig_peak_mindist=p['sig_peak_mindist'],
+                    neighbor_mode=p.get('neighbor_mode', 'shape'),
+                    use_input=p.get('use_input', True))
                 run = CVARun(cfg)
                 if self.cache:
                     print('Reusing the record read for the preview')
@@ -278,7 +280,9 @@ class PreviewWorker(QObject):
                 ranklock=p['ranklock'], eval_stride=p['eval_stride'],
                 fs=p['fs'], freq_min=p['freq_min'], freq_max=p['freq_max'],
                 sig_threshold_fraction=p['sig_threshold_fraction'],
-                sig_peak_mindist=p['sig_peak_mindist'])
+                sig_peak_mindist=p['sig_peak_mindist'],
+                    neighbor_mode=p.get('neighbor_mode', 'shape'),
+                    use_input=p.get('use_input', True))
             run = CVARun(cfg)
             # The preview always reads the whole record: the time window is
             # chosen by looking at it, so it cannot be applied beforehand.
@@ -458,6 +462,21 @@ class ParamPanel(QScrollArea):
         f.addRow('neighbors', self._spin('neighbors', 1000, 10, 100000))
         f.addRow('ranklock (0=auto)', self._spin('ranklock', 0, 0, 512))
         f.addRow('eval stride', self._spin('eval_stride', 1, 1, 10000))
+        self.w['neighbor_mode'] = QComboBox()
+        self.w['neighbor_mode'].addItems(['shape', 'time', 'level'])
+        self.w['neighbor_mode'].setToolTip(
+            'Which windows each local model is fitted from:\n'
+            'shape - those whose response history looks most like the '
+            'current one\n'
+            'time  - those nearest in time\n'
+            'level - those at the nearest response level')
+        f.addRow('neighbours by', self.w['neighbor_mode'])
+        self.w['use_input'] = QCheckBox('input history in each fit')
+        self.w['use_input'].setChecked(True)
+        self.w['use_input'].setToolTip(
+            'Fit each local model with the input over its window. '
+            'Unchecked gives the original output-only fit.')
+        f.addRow('', self.w['use_input'])
         f.addRow('n_jobs (-1=all)', self._spin('n_jobs', 1, -1, 64))
         f.addRow('freq min (Hz)', self._text('freq_min', '0'))
         f.addRow('freq max (0=Nyq)', self._text('freq_max', '0'))
@@ -1379,7 +1398,7 @@ class MainWindow(QMainWindow):
             if p['plot_clusters'] and clust is not None:
                 jobs += [
                     ('PCA variance', lambda: clust.plot_pca_variance(dpi=p['dpi'])),
-                    ('Elbow',        lambda: clust.plot_elbow(dpi=p['dpi'])),
+                    ('Regime test',  lambda: clust.plot_elbow(dpi=p['dpi'])),
                     ('Regimes',      lambda: clust.plot_regime_timeseries(dpi=p['dpi'])),
                     ('z-plane',      lambda: clust.plot_eigenvalues_zplane(dpi=p['dpi'])),
                     ('Cluster ampl.', lambda: clust.plot_cluster_amplitude(dpi=p['dpi'])),
