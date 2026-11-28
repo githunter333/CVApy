@@ -348,6 +348,7 @@ class FigureTab(QWidget):
         self.fig = fig
         w, h = fig.get_size_inches()
         self._aspect = float(h) / float(w)
+        self._size = (float(w), float(h))
         self.canvas = canvas = FigureCanvasQTAgg(fig)
         canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         toolbar = NavigationToolbar2QT(canvas, self)
@@ -362,10 +363,27 @@ class FigureTab(QWidget):
         canvas.draw_idle()
 
     def _fit(self):
+        """Size the canvas, and set the figure's resolution so that it keeps
+        the size in inches it was laid out for. Text and panels then scale
+        with the window together, as on the saved page; otherwise a figure
+        laid out 14 inches wide and shown in a narrower tab has text too
+        large for its panels, and labels run into each other."""
+        bar = self.scroll.verticalScrollBar().sizeHint().width()
         if self._aspect > 1.0:
-            bar = self.scroll.verticalScrollBar().sizeHint().width()
             width = max(self.width() - bar, 200)
             self.canvas.setMinimumHeight(int(width * self._aspect))
+            dpi = width / self._size[0]
+        else:
+            width = max(self.width(), 200)
+            height = max(self.scroll.height(), 150)
+            dpi = min(width / self._size[0], height / self._size[1])
+        ratio = getattr(self.canvas, 'device_pixel_ratio', 1) or 1
+        try:
+            self.fig._original_dpi = dpi
+            self.fig._set_dpi(dpi * ratio, forward=False)
+        except AttributeError:               # other Matplotlib versions
+            self.fig.set_dpi(dpi * ratio)
+        self.canvas.draw_idle()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -385,6 +403,7 @@ class ParamPanel(QScrollArea):
     data_chosen       = Signal(str)   # a record was picked from a dialog
     window_changed    = Signal()      # t_start / t_end edited by hand
     suggest_requested = Signal()      # 'Suggest' pressed
+    roles_changed     = Signal()      # a channel's role was changed by hand
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -756,6 +775,8 @@ class ParamPanel(QScrollArea):
             combo.setProperty('src', src)
             combo.setProperty('col', c)
             combo.currentTextChanged.connect(self._refresh_cost)
+            combo.currentTextChanged.connect(
+                lambda *_: self.roles_changed.emit())
             self.tbl.setCellWidget(r, 3, combo)
         self._refresh_cost()
 
@@ -960,6 +981,7 @@ class MainWindow(QMainWindow):
         self.params.setMinimumWidth(330)
         self.params.setMaximumWidth(430)
         self.params.data_chosen.connect(self._on_data_chosen)
+        self.params.roles_changed.connect(self._on_roles_changed)
         self.params.suggest_requested.connect(self.on_suggest)
         # Typing a rate is the one thing standing between a no-time-column
         # record and being read, so Enter there just loads it.
@@ -1108,6 +1130,17 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     @Slot(str)
+    def _on_roles_changed(self):
+        """The record in memory was read with the old roles. The analyses
+        work on that record, so they wait until it is read again."""
+        if self.run_obj is None:
+            return
+        self.btn_nl.setEnabled(False)
+        self.btn_plots.setEnabled(False)
+        self.statusBar().showMessage(
+            'Channel roles changed — press "Load record" to read the record '
+            'with the new roles.')
+
     def _on_data_chosen(self, path):
         """
         Load the record the moment it is picked — unless it cannot be read

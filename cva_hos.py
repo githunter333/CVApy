@@ -351,7 +351,8 @@ def plot_hos(hh: HosResult, channel: int = 0, save_path=None, dpi: int = 130):
         ax.set_yscale('log')
         ax.set_ylim(1.0, max(60.0, 1.5 * np.nanmax(val)))
         if len(hh.names) > 8:
-            ax.tick_params(axis='x', labelrotation=45)
+            for t in ax.get_xticklabels():   # end of each label at its bar
+                t.set(rotation=45, ha='right', rotation_mode='anchor')
         ax.set_title(f"{j + 3}. {name} coupling at every channel",
                      fontsize=10, loc='left')
         ax.legend(fontsize=8, framealpha=0.9, loc='lower right')

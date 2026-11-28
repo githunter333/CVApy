@@ -345,11 +345,14 @@ def plot_record(res: SpectraResult, channels: Optional[Sequence[int]] = None,
 
     if len(ch) > 8:                      # many channels: slant the labels
         for a in fig.axes[-3:]:
-            a.tick_params(axis='x', labelrotation=45)
+            for t in a.get_xticklabels():    # end of each label at its bar
+                t.set(rotation=45, ha='right', rotation_mode='anchor')
     fig.suptitle(f"{res.label}   excitation band {res.band[0]:.0f}-"
                  f"{res.band[1]:.0f} Hz, input rms "
-                 f"{', '.join(f'{v:.3g}' for v in res.in_rms)}", fontsize=13)
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
+                 f"{', '.join(f'{v:.3g}' for v in res.in_rms)}", fontsize=13,
+                 y=1 - 0.12 / fig.get_figheight())
+    # leave half an inch at the top for the heading
+    fig.tight_layout(rect=(0, 0.03, 1, 1 - 0.5 / fig.get_figheight()))
     _footer(fig)
     if save_path:
         fig.savefig(save_path, dpi=dpi)
