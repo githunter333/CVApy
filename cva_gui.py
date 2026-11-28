@@ -601,7 +601,7 @@ class ParamPanel(QScrollArea):
                 ('plot_freq_deviation', 'Frequency deviation'),
                 ('plot_reconstruction', 'Modal reconstruction'),
                 ('plot_iterated',       'Iterated prediction'),
-                ('plot_clusters',       'Cluster diagnostics (6)'),
+                ('plot_clusters',       'Cluster diagnostics (8)'),
                 ('plot_modes',          'Mode shapes (3+)')):
             cb = QCheckBox(label)
             cb.setChecked(True)
@@ -1461,6 +1461,9 @@ class MainWindow(QMainWindow):
                     ('z-plane',      lambda: clust.plot_eigenvalues_zplane(dpi=p['dpi'])),
                     ('Cluster ampl.', lambda: clust.plot_cluster_amplitude(dpi=p['dpi'])),
                     ('PCA scatter',  lambda: clust.plot_pca_scatter(dpi=p['dpi'])),
+                    ('Modal levels', lambda: clust.plot_modal_levels(
+                        channel=p['channel'], dpi=p['dpi'])),
+                    ('Conditions',   lambda: clust.plot_conditions(dpi=p['dpi'])),
                 ]
             if p['plot_modes'] and ms is not None:
                 jobs += [

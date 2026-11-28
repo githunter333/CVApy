@@ -44,6 +44,145 @@ from cva_plotting import show_if_enabled
 from cva_run import CVARun
 
 
+def _runs(flag):
+    """Lengths of the unbroken runs of True in a boolean series."""
+    b = np.concatenate([[0], np.asarray(flag, int), [0]])
+    edges = np.flatnonzero(np.diff(b))
+    return edges[1::2] - edges[::2]
+
+
+def content_decision(order, presence, log_level=None, min_frac=0.15,
+                     run_factor=2.5, valley=0.5):
+    """
+    One condition or two, from what the local models contain.
+
+    order    : (n,) number of states each window supports.
+    presence : (n, n_modes) bool, whether each tracked mode has a pole in
+               each window.
+    log_level: (n,) log response level, used only to name the conditions.
+
+    Two things a linear system keeps fixed under random excitation are used:
+    the number of states and the set of modes present. (How the response is
+    shared between the modes is not used; that moves with the excitation
+    even in a linear system.)
+
+    Two conditions are reported when the order is two-valued: two groups of
+    at least min_frac of the windows each, centres apart by at least 2
+    states and 25%, with few windows in between (the count midway is at
+    most `valley` of the smaller group's peak).
+
+    Modes that come and go in stretches are found as well: present in
+    min_frac to 1 - min_frac of the windows, in runs at least run_factor
+    times as long as chance would give. They help decide which condition a
+    window is in, and are named in the verdict, but on their own (with no
+    change of order) they are reported as a note, not as a second
+    condition; a single weak mode drifting in and out of its track is too
+    little to go on.
+
+    Returns dict: n_conditions (1 or 2), labels (n,) 0/1, order_two_valued,
+    sustained (indices of the modes that come and go), conditions (list of
+    dicts: name, share, order, level, present), level_corr, verdict.
+    """
+    order = np.asarray(order, float)
+    P = np.asarray(presence, bool).reshape(len(order), -1)
+    n = len(order)
+    out = dict(n_conditions=1, labels=np.zeros(n, int),
+               order_two_valued=False, sustained=[], conditions=[],
+               level_corr=np.nan, verdict='one condition')
+    if n < 20:
+        out['verdict'] = 'one condition (too few windows to test)'
+        return out
+
+    # --- order: two groups with a gap between them ---
+    lo, hi = np.percentile(order, [10, 90])
+    cut = None
+    if hi - lo >= max(2.0, 0.25 * max(lo, 1.0)):
+        vals = np.unique(order)
+        best = None
+        for c in 0.5 * (vals[:-1] + vals[1:]):          # every split point
+            a, b = order[order < c], order[order > c]
+            if min(len(a), len(b)) < min_frac * n:
+                continue
+            score = len(a) * a.var() + len(b) * b.var()
+            if best is None or score < best[0]:
+                best = (score, c, a, b)
+        if best is not None:
+            _, c, a, b = best
+            ca, cb = np.median(a), np.median(b)
+            width = max(1.0, (cb - ca) / 6.0)
+            count = lambda x: np.sum(np.abs(order - x) <= width)
+            mid = count(0.5 * (ca + cb))
+            if (cb - ca >= max(2.0, 0.25 * max(ca, 1.0))
+                    and mid <= valley * min(count(ca), count(cb))):
+                cut = c
+    out['order_two_valued'] = cut is not None
+
+    # --- modes that come and go in stretches ---
+    sustained = []
+    for j in range(P.shape[1]):
+        f = P[:, j].mean()
+        if not (min_frac <= f <= 1 - min_frac):
+            continue
+        on, off = _runs(P[:, j]), _runs(~P[:, j])
+        if (on.mean() >= run_factor / (1 - f)
+                and off.mean() >= run_factor / f):
+            sustained.append(j)
+    out['sustained'] = sustained
+
+    if cut is None:
+        notes = []
+        if hi - lo >= max(2.0, 0.25 * max(lo, 1.0)):
+            notes.append(f'the order varies between {lo:.0f} and {hi:.0f} '
+                         f'without two distinct groups')
+        if sustained:
+            notes.append(f"{len(sustained)} mode"
+                         f"{'s come' if len(sustained) > 1 else ' comes'} "
+                         f"and go{'' if len(sustained) > 1 else 'es'} in "
+                         f"stretches")
+        if notes:
+            out['verdict'] = 'one condition; ' + '; '.join(notes)
+        return out
+
+    # --- label the windows ---
+    cols = []
+    if cut is not None:
+        cols.append((order > cut).astype(float))
+    for j in sustained:
+        cols.append(P[:, j].astype(float))
+    Z = np.column_stack(cols)
+    Z = (Z - Z.mean(0)) / (Z.std(0) + 1e-12)
+    if Z.shape[1] == 1:
+        lab = (Z[:, 0] > 0).astype(int)
+    else:
+        _, _, vt = np.linalg.svd(Z, full_matrices=False)
+        lab = ((Z @ vt[0]) > 0).astype(int)
+    if min(lab.mean(), 1 - lab.mean()) < min_frac:
+        return out
+    if log_level is not None:
+        ll = np.asarray(log_level, float)
+        if ll[lab == 1].mean() < ll[lab == 0].mean():
+            lab = 1 - lab                         # 0 = quieter, 1 = louder
+        out['level_corr'] = float(np.corrcoef(lab, ll)[0, 1])
+    by_level = abs(out['level_corr']) >= 0.3
+    names = ('quieter', 'louder') if by_level else ('A', 'B')
+    for k in (0, 1):
+        m = lab == k
+        out['conditions'].append(dict(
+            name=names[k], share=float(m.mean()),
+            order=float(np.median(order[m])),
+            level=(float(np.exp(np.mean(ll[m]))) if log_level is not None
+                   else np.nan),
+            present=P[m].mean(axis=0)))
+    out['n_conditions'], out['labels'] = 2, lab
+    c0, c1 = out['conditions']
+    out['verdict'] = (
+        f"two conditions: {c0['name']} ({100*c0['share']:.0f}% of the time, "
+        f"order {c0['order']:.0f}) and {c1['name']} "
+        f"({100*c1['share']:.0f}%, order {c1['order']:.0f})"
+        + (', set by the response level' if by_level else ''))
+    return out
+
+
 def _get_physical(mean_ev, dt, fs, min_im_frac=0.01, f_min=None, f_max=None):
     ce      = np.log(mean_ev + 1e-300) / dt
     omega_d = np.abs(np.imag(ce))
@@ -119,6 +258,7 @@ class CVAPhiCluster:
         self.track_freq: Optional[np.ndarray] = None   # (n_use, n_modes), NaN = not found
         self.track_zeta: Optional[np.ndarray] = None
         self.track_pole: Optional[np.ndarray] = None   # complex
+        self.content:    Optional[dict] = None   # content_conditions()
         self.level:      Optional[np.ndarray] = None   # (n_use,) log10 response rms
         self.sep_D:      Optional[np.ndarray] = None   # (n_modes,) cluster separation
         self.sep_gap:    Optional[np.ndarray] = None
@@ -143,6 +283,134 @@ class CVAPhiCluster:
         self._final_clustering(forced=n_clusters > 0)
         self._eigenvalue_analysis()
         self._frequency_shift_report()
+        self.content_conditions()
+
+    # ------------------------------------------------------------------
+    # conditions: what the local models contain, window by window
+    # ------------------------------------------------------------------
+    def content_conditions(self, wide_tol: Optional[float] = None,
+                           verbose: bool = True, **kw):
+        """One condition or two, from the number of states each window
+        supports and the set of modes present in it (content_decision).
+
+        A mode counts as present when the window has a pole within wide_tol
+        of its frequency (default three times match_tol), so a mode that
+        has only shifted with level is not counted as gone.
+        Keyword arguments go to content_decision. The result is kept in
+        self.content."""
+        run = self.run
+        tol = wide_tol or 3.0 * self.match_tol
+        wins = [run.windows[w] for w in self.use_idx]
+        order = np.array([w.rank_auto or w.rank for w in wins], float)
+        P = np.zeros((len(wins), len(self.ref_freq)), bool)
+        for ii, wi in enumerate(self.use_idx):
+            fr = self._window_poles(wi)[1]
+            if len(fr):
+                P[ii] = (np.abs(fr[:, None] - self.ref_freq[None, :])
+                         < tol * self.ref_freq[None, :]).any(axis=0)
+        lev = None
+        if run.past_db is not None and run.datout is not None:
+            lev = np.log(run.window_level()[[w.window_idx for w in wins]]
+                         + 1e-300)
+        res = content_decision(order, P, lev, **kw)
+        res.update(time=np.array([w.time for w in wins]), order=order,
+                   presence=P, log_level=lev)
+        self.content = res
+        if verbose:
+            print(f"\nConditions (states and modes in each window): "
+                  f"{res['verdict']}")
+            if res['n_conditions'] == 2:
+                head = ''.join(f'{f:8.0f}' for f in self.ref_freq)
+                print(f"  {'condition':>10} {'time':>6} {'order':>6} "
+                      f"{'level':>8}   % of windows with each mode (Hz)")
+                print(f"  {'':>10} {'':>6} {'':>6} {'':>8} {head}")
+                for c in res['conditions']:
+                    row = ''.join(f'{100*v:7.0f}%' for v in c['present'])
+                    print(f"  {c['name']:>10} {100*c['share']:5.0f}% "
+                          f"{c['order']:6.0f} {c['level']:8.3g} {row}")
+                if res['sustained']:
+                    print('  modes that come and go in stretches: '
+                          + ', '.join(f'{self.ref_freq[j]:.0f} Hz'
+                                      for j in res['sustained']))
+        return res
+
+    def plot_conditions(self, save_path=None, dpi=150):
+        """Response level, the order each window supports, and which modes
+        are present, against time, coloured by condition."""
+        res = getattr(self, 'content', None) or self.content_conditions(
+            verbose=False)
+        t, order, P, lab = (res['time'], res['order'], res['presence'],
+                            res['labels'])
+        two = res['n_conditions'] == 2
+        colors = np.array(['tab:blue', 'tab:red'])
+        names = ([c['name'] for c in res['conditions']] if two
+                 else ['one condition'])
+        nm = P.shape[1]
+        fig, ax = plt.subplots(
+            3, 1, figsize=(14, 7.5 + 0.28 * nm), sharex=True,
+            gridspec_kw=dict(height_ratios=[1, 1, 0.6 + 0.22 * nm]))
+        dt = np.median(np.diff(t)) if len(t) > 1 else 1.0
+
+        def shade(a):
+            if not two:
+                return
+            for k in (0, 1):
+                a.fill_between(t, 0, 1, where=lab == k, step='mid',
+                               color=colors[k], alpha=0.13, lw=0,
+                               transform=a.get_xaxis_transform(),
+                               label=f"{names[k]} condition "
+                                     f"({100*np.mean(lab == k):.0f}% of the "
+                                     f"time)")
+
+        if res['log_level'] is not None:
+            lev = np.exp(res['log_level'])
+            ax[0].semilogy(t, lev / np.median(lev), color='0.2', lw=1.0,
+                           label='response level in each window / median')
+        shade(ax[0])
+        ax[0].set_ylabel('level / median')
+        ax[0].set_title('Response level', loc='left', fontsize=10)
+        ax[0].legend(fontsize=8, ncol=3, loc='upper right')
+        ax[0].grid(True, alpha=0.3, which='both')
+
+        ax[1].step(t, order, where='mid', color='0.2', lw=0.9,
+                   label='states each window supports')
+        shade(ax[1])
+        if two:
+            for k, c in enumerate(res['conditions']):
+                ax[1].axhline(c['order'], color=colors[k], ls='--', lw=1.0,
+                              label=f"{c['name']}: median {c['order']:.0f}")
+        ax[1].set_ylabel('states')
+        ax[1].set_title('Model order', loc='left', fontsize=10)
+        handles, labels = ax[1].get_legend_handles_labels()
+        keep = [i for i, l in enumerate(labels) if 'condition (' not in l]
+        ax[1].legend([handles[i] for i in keep], [labels[i] for i in keep],
+                     fontsize=8, ncol=3, loc='upper right')
+        ax[1].grid(True, alpha=0.3)
+
+        for j in range(nm):
+            for k in ((0, 1) if two else (0,)):
+                m = P[:, j] & (lab == k)
+                ax[2].scatter(t[m], np.full(m.sum(), j), marker='|', s=90,
+                              color=colors[k] if two else '0.2', lw=1.2)
+        ticks = []
+        for j, f0 in enumerate(self.ref_freq):
+            mark = ' *' if j in res['sustained'] else ''
+            ticks.append(f"{f0:.1f} Hz ({100*P[:, j].mean():.0f}%){mark}")
+        ax[2].set_yticks(range(nm), ticks, fontsize=8)
+        ax[2].set_ylim(-0.7, nm - 0.3)
+        ax[2].set_xlabel('time, s')
+        ax[2].set_title('Modes present in each window (a mark = the window '
+                        'has that pole; % of windows in brackets'
+                        + ('; * = comes and goes in stretches)'
+                           if res['sustained'] else ')'),
+                        loc='left', fontsize=10)
+        ax[2].grid(True, axis='x', alpha=0.3)
+        ax[2].set_xlim(t[0] - dt, t[-1] + dt)
+        fig.suptitle('Conditions from model content: ' + res['verdict'],
+                     fontsize=12, wrap=True)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def _select_windows(self):
         ranks = np.array([w.rank for w in self.run.windows])
@@ -508,6 +776,156 @@ class CVAPhiCluster:
         self.plot_eigenvalues_zplane(save_path=sp('clusters_zplane'), dpi=dpi)
         self.plot_cluster_amplitude(save_path=sp('clusters_amplitude'), dpi=dpi)
         self.plot_pca_scatter(save_path=sp('clusters_pca_scatter'), dpi=dpi)
+        if self.track_pole is not None:
+            self.plot_modal_levels(save_path=sp('clusters_modal_levels'),
+                                   dpi=dpi)
+            self.plot_conditions(save_path=sp('clusters_conditions'),
+                                 dpi=dpi)
+
+    def modal_levels(self, win_sec: float = 0.1, history: dict = None):
+        """Level of each tracked mode against time: rms of the mode's
+        rebuilt acceleration (modal_history) over a sliding win_sec.
+
+        Returns dict: time (M,), level (M, n_modes, n_out), measured
+        (M, n_out) the same rms of the measured response; NaN where the mode
+        was found in less than half of the window."""
+        h = history or self.modal_history()
+        fs = self.run.fs
+        k = max(2, int(round(win_sec * fs)))
+        step = max(1, k // 4)
+        box = np.ones(k) / k
+
+        def rms(x):
+            good = np.isfinite(x)
+            p = np.convolve(np.where(good, x, 0.0) ** 2, box, mode='same')
+            w = np.convolve(good.astype(float), box, mode='same')
+            out = np.sqrt(p / np.maximum(w, 1e-12))
+            out[w < 0.5] = np.nan
+            return out[::step]
+
+        m, y = h['modal'], h['measured']
+        t = h['time'][::step]
+        level = np.stack([np.stack([rms(m[:, j, c])
+                                    for c in range(m.shape[2])], axis=1)
+                          for j in range(m.shape[1])], axis=1)
+        measured = np.stack([rms(y[:, c]) for c in range(y.shape[1])],
+                            axis=1)
+        return dict(time=t, level=level, measured=measured)
+
+    def plot_modal_levels(self, channel: Optional[int] = None,
+                          win_sec: float = 0.0,
+                          band_top: Optional[float] = None,
+                          t_lim: Optional[Tuple[float, float]] = None,
+                          names: Optional[List[str]] = None,
+                          save_path=None, dpi=150):
+        """Which part of the response is present when: for one response
+        channel, the measured signal, its spectrogram, and the level of each
+        tracked mode against time on one graph.
+
+        channel  : response channel (0-based). None picks the channel where
+                   the modes that come and go (found in under 90% of the
+                   windows) are the largest share of the response.
+        win_sec  : averaging time for the levels; 0 picks 0.1 s or 1/300 of
+                   the time shown, whichever is longer.
+        band_top : top of the excitation band in Hz, if known; modes above
+                   it are drawn dashed and labelled.
+        t_lim    : (start, end) seconds to show; the whole record if None.
+        """
+        from scipy.signal import spectrogram
+        run = self.run
+        fs = run.fs
+        h = self.modal_history()
+        t, y = h['time'], h['measured']
+        if win_sec <= 0:
+            span = (t_lim[1] - t_lim[0]) if t_lim else (t[-1] - t[0])
+            win_sec = max(0.1, span / 300.0)
+        lv = self.modal_levels(win_sec, history=h)
+        nm = len(self.ref_freq)
+        n_out = y.shape[1]
+        if names is None:
+            names = list(getattr(run, 'out_names', None) or [])
+        if len(names) != n_out:
+            names = [f'response {c + 1}' for c in range(n_out)]
+        ms = np.nanmean(np.nan_to_num(h['modal']) ** 2, axis=0)  # (nm, n_out)
+        if channel is None:
+            # the modes that come and go, or failing that all but the
+            # strongest one
+            found = np.isfinite(self.track_freq).mean(axis=0)
+            pick = found < 0.9
+            if not pick.any():
+                pick = np.arange(nm) != np.argmax(ms.sum(axis=1))
+            channel = int(np.argmax(ms[pick].sum(axis=0)
+                                    / (y.var(axis=0) + 1e-300)))
+        channel = int(np.clip(channel, 0, n_out - 1))
+        t0, t1 = t_lim if t_lim else (t[0], t[-1])
+
+        fig, ax = plt.subplots(3, 1, figsize=(14, 11), sharex=True,
+                               gridspec_kw=dict(height_ratios=[1, 1.3, 1.6]))
+        w = (t >= t0) & (t <= t1)
+        ax[0].plot(t[w], y[w, channel], color='0.2', lw=0.4,
+                   label=f'measured response, {names[channel]}')
+        ax[0].set_ylabel('response')
+        ax[0].set_title('Measured response', loc='left', fontsize=10)
+        ax[0].legend(fontsize=8, loc='upper right')
+        ax[0].grid(True, alpha=0.3)
+
+        nseg = int(2 ** np.round(np.log2(max(64, 0.1 * fs))))
+        nseg = min(nseg, len(y) // 8)
+        f, ts, Sxx = spectrogram(y[:, channel], fs=fs, nperseg=nseg,
+                                 noverlap=nseg - max(1, nseg // 8))
+        ts = ts + t[0]
+        f_top = self.f_max or fs / 2
+        ws, wf = (ts >= t0) & (ts <= t1), f <= f_top
+        db = 10 * np.log10(Sxx[np.ix_(wf, ws)] + 1e-300)
+        ax[1].pcolormesh(ts[ws], f[wf], db, shading='auto', cmap='viridis',
+                         vmin=db.max() - 60, vmax=db.max(), rasterized=True)
+        cmap = plt.cm.turbo(np.linspace(0.05, 0.95, max(nm, 2)))
+        for j, f0 in enumerate(self.ref_freq):
+            ax[1].plot([t1], [f0], marker='<', color=cmap[j], ms=9,
+                       clip_on=False, zorder=5)
+        if band_top:
+            ax[1].axhline(band_top, color='w', ls='--', lw=1.0,
+                          label=f'top of the excitation band, '
+                                f'{band_top:.0f} Hz')
+            ax[1].legend(fontsize=8, loc='upper right')
+        ax[1].set_ylim(0, f_top)
+        ax[1].set_ylabel('Hz')
+        ax[1].set_title('Spectrogram of the measured response (60 dB '
+                        'range); arrows at the right mark the tracked modes',
+                        loc='left', fontsize=10)
+
+        tl = lv['time']
+        wl = (tl >= t0) & (tl <= t1)
+        ax[2].semilogy(tl[wl], lv['measured'][wl, channel], color='k',
+                       lw=1.6, label='measured response, all of it')
+        for j, f0 in enumerate(self.ref_freq):
+            above = bool(band_top) and f0 > band_top
+            found = 100 * np.isfinite(lv['level'][:, j, channel]).mean()
+            ax[2].semilogy(tl[wl], lv['level'][wl, j, channel],
+                           color=cmap[j], lw=1.1,
+                           ls='--' if above else '-',
+                           label=f'{f0:.1f} Hz mode'
+                                 + (', above the band' if above else '')
+                                 + f' (found {found:.0f}% of the time)')
+        good = lv['level'][wl][:, :, channel]
+        if np.isfinite(good).any():
+            lo = np.nanpercentile(good, 2)
+            ax[2].set_ylim(max(lo / 3, 1e-6 * np.nanmax(lv['measured'])),
+                           2 * np.nanmax(lv['measured'][wl, channel]))
+        ax[2].set_ylabel(f'rms over {win_sec:.2g} s')
+        ax[2].set_xlabel('time, s')
+        ax[2].set_title('Level of each mode against time, from the rebuilt '
+                        'modal response (gaps: mode not found)', loc='left',
+                        fontsize=10)
+        ax[2].legend(fontsize=8, ncol=3, loc='upper center',
+                     bbox_to_anchor=(0.5, -0.16))
+        ax[2].grid(True, alpha=0.3, which='both')
+        ax[2].set_xlim(t0, t1)
+        fig.suptitle(f'Modal content against time at {names[channel]}',
+                     fontsize=12)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        self._savefig(fig, save_path, dpi); show_if_enabled()
+        return fig
 
     def plot_pca_variance(self, save_path=None, dpi=150):
         if self._cum_var is None:

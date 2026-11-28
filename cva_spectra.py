@@ -54,6 +54,11 @@ class SpectraResult:
     coarse_noncoherent: np.ndarray = None   # same fraction at half the
                                             # frequency resolution
     names:   List[str] = field(default_factory=list)
+    from_spectra: bool = False   # built by analyze_spectra: no time history,
+                                 # so no skewness or kurtosis
+    oob_known: bool = True       # False when the spectra stop at the top of
+                                 # the excitation band
+    n_avg:   int = 0             # averages behind the spectra, if known
 
     # ---- derived spectra -------------------------------------------------
     @property
@@ -79,6 +84,8 @@ class SpectraResult:
     def frac_out_of_band(self):
         """Share of each channel's mean square above the excitation band."""
         ny = self.fs / 2
+        if not self.oob_known:
+            return np.full(self.s_tot.shape[1], np.nan)
         return (self._power(self.s_tot, self.band[1], ny)
                 / self._power(self.s_tot, 0, ny))
 
@@ -99,6 +106,27 @@ class SpectraResult:
         return ((self.coarse_noncoherent - fine > 0.02)
                 & (self.coarse_noncoherent > 1.1 * fine))
 
+    def notes(self):
+        """Cautions that apply to a result built from spectra."""
+        out = []
+        if not self.from_spectra:
+            return out
+        out.append('rms values cover only the frequency range of the '
+                   'spectra; skewness and kurtosis need time histories')
+        if not self.oob_known:
+            out.append(f'the spectra stop at {self.freq[-1]:.4g} Hz, the top '
+                       f'of the excitation band, so energy above the band '
+                       f'cannot be seen')
+        n_in = self.s_in.shape[1]
+        if self.n_avg and self.n_avg < 10 * n_in:
+            out.append(f'{self.n_avg} averages for {n_in} inputs: the '
+                       f'coherence reads high by about {n_in}/{self.n_avg}, '
+                       f'so the non-coherent share reads low')
+        elif not self.n_avg and n_in > 1:
+            out.append(f'number of averages not given; with {n_in} inputs '
+                       f'and few averages the non-coherent share reads low')
+        return out
+
     def noncoherent_peaks(self, channel: int, n: int = 6,
                           prominence_db: float = 6.0):
         """Frequencies of the strongest peaks in one channel's non-coherent
@@ -118,7 +146,25 @@ class SpectraResult:
                              noncoherent=self.frac_noncoherent[c],
                              noncoherent_in_band=self.frac_noncoherent_in_band[c],
                              out_of_band=self.frac_out_of_band[c]))
-        if verbose:
+        if verbose and self.from_spectra:
+            print(f"\n{self.label}: from spectra, {self.freq[0]:.4g} to "
+                  f"{self.freq[-1]:.4g} Hz at "
+                  f"{self.freq[1] - self.freq[0]:.4g} Hz; excitation band "
+                  f"{self.band[0]:.0f}-{self.band[1]:.0f} Hz, "
+                  f"input rms {np.round(self.in_rms, 3)}")
+            for line in self.notes():
+                print('  note: ' + line)
+            print(f"{'channel':>8} {'rms':>9} {'non-coh':>8} {'in-band':>8} "
+                  f"{'out-band':>9}")
+            lim = self.resolution_limited
+            for c, r in enumerate(rows):
+                oob = (f"{100*r['out_of_band']:8.1f}%" if self.oob_known
+                       else f"{'-':>9}")
+                print(f"{r['channel']:>8} {r['rms']:9.3f} "
+                      f"{100*r['noncoherent']:7.1f}% "
+                      f"{100*r['noncoherent_in_band']:7.1f}% {oob}"
+                      f"{'  resolution-limited' if lim[c] else ''}")
+        elif verbose:
             print(f"\n{self.label}: excitation band "
                   f"{self.band[0]:.0f}-{self.band[1]:.0f} Hz, "
                   f"input rms {np.round(self.in_rms, 3)}, "
@@ -247,6 +293,168 @@ def analyze_record(inputd, datout, fs: float, label: str = '',
                          coarse_noncoherent=coarse, names=list(names))
 
 
+def _freq_first(a, F, what):
+    """Move the frequency axis of a 3-D array to the front."""
+    a = np.asarray(a)
+    if a.ndim != 3:
+        raise ValueError(f'{what} must have three dimensions, got {a.shape}')
+    if a.shape[0] == F and a.shape[2] != F:
+        return a
+    if a.shape[2] == F:
+        return np.moveaxis(a, 2, 0)
+    raise ValueError(f'{what} has shape {a.shape}; no axis matches the '
+                     f'{F} frequency lines')
+
+
+def _columns(a, F, what):
+    a = np.asarray(a, float)
+    if a.ndim == 1:
+        a = a[:, None]
+    if a.shape[0] != F and a.shape[1] == F:
+        a = a.T
+    if a.shape[0] != F:
+        raise ValueError(f'{what} has shape {a.shape}; expected {F} '
+                         f'frequency lines')
+    return a
+
+
+def analyze_spectra(freq, s_resp=None, coherence=None, s_in=None,
+                    c_resp=None, c_in=None, H=None, c_in_resp=None,
+                    label: str = '', names: Optional[Sequence[str]] = None,
+                    band: Optional[Tuple[float, float]] = None,
+                    n_avg: int = 0) -> SpectraResult:
+    """
+    The coherent / non-coherent / out-of-band split from stored spectra,
+    for a test where the time histories were not kept. The result works
+    with table(), plot_record() and plot_comparison() like one from
+    analyze_record(); skewness and kurtosis are not available.
+
+    freq   : (F,) frequencies, Hz, evenly spaced.
+
+    Response spectral density, one of
+      s_resp : (F, n_out)
+      c_resp : (n_out, n_out, F) or (F, n_out, n_out) cross-spectral
+               matrix; its diagonal is used.
+
+    Coherence with the inputs, one of
+      coherence : (F, n_out); the multiple coherence if several inputs.
+      H and c_in : frequency responses (n_out, n_in, F) or (F, n_out, n_in)
+               and the input cross-spectral matrix (n_in, n_in, F) or
+               (F, n_in, n_in), with c_in[i, j] = E[u_i conj(u_j)] so that
+               the coherent part is H c_in H^H.
+      c_in_resp and c_in : input-to-response cross-spectra (n_in, n_out, F)
+               or (F, n_in, n_out), E[conj(u) y], and the input matrix.
+    Frequency responses with input spectra but no response spectral density
+    or coherence are not enough: they give only the coherent part.
+
+    Input spectral density (for the excitation band and the input rms)
+      s_in : (F, n_in), or the diagonal of c_in. If neither is given, give
+             band.
+
+    band   : (low, high) Hz excitation band; found from the input spectra
+             if omitted.
+    n_avg  : number of averages behind the spectra, if known. With few
+             averages per input the coherence reads high.
+
+    Out-of-band energy can be reported only if the spectra run past the top
+    of the excitation band; otherwise it is left blank.
+    """
+    freq = np.asarray(freq, float).ravel()
+    F = len(freq)
+    if F < 8 or np.ptp(np.diff(freq)) > 1e-6 * freq[-1]:
+        raise ValueError('freq must be evenly spaced, at least 8 lines')
+    df = freq[1] - freq[0]
+
+    if s_resp is not None:
+        Syy = _columns(s_resp, F, 's_resp')
+    elif c_resp is not None:
+        Cy = _freq_first(c_resp, F, 'c_resp')
+        Syy = np.real(np.einsum('kii->ki', Cy))
+    else:
+        raise ValueError('Give the response spectral density: s_resp or '
+                         'c_resp')
+    n_out = Syy.shape[1]
+
+    Cu = None if c_in is None else _freq_first(c_in, F, 'c_in')
+    Suy = None                     # (F, n_in, n_out), E[conj(u) y]
+    if coherence is not None:
+        coh = _columns(coherence, F, 'coherence')
+    elif H is not None and Cu is not None:
+        Hf = _freq_first(H, F, 'H')                     # (F, n_out, n_in)
+        Suy = np.einsum('kji,koj->kio', Cu, Hf)        # E[conj(u) y]
+        coh = np.real(np.einsum('koj,kjl,kol->ko', Hf, Cu, np.conj(Hf)))
+        coh = coh / np.maximum(Syy, 1e-300)
+    elif c_in_resp is not None and Cu is not None:
+        Suy = _freq_first(c_in_resp, F, 'c_in_resp')
+        coh = _coherent_power(np.conj(Cu), Suy) / np.maximum(Syy, 1e-300)
+    else:
+        raise ValueError('Give the coherence, or H with c_in, or c_in_resp '
+                         'with c_in. Frequency responses alone give only '
+                         'the coherent part.')
+    if coh.shape != Syy.shape:
+        raise ValueError(f'coherence {coh.shape} does not match the '
+                         f'response spectra {Syy.shape}')
+    strong = Syy > 1e-6 * Syy.max(axis=0)
+    if np.mean(coh[strong] > 1.05) > 0.01:
+        raise ValueError(
+            'The coherent part exceeds the measured response at '
+            f'{100 * np.mean(coh[strong] > 1.05):.0f}% of the lines. Check '
+            'that the arrays belong together and follow the conventions in '
+            'the docstring (c_in[i, j] = E[u_i conj(u_j)]).')
+    coh = np.clip(coh, 0.0, 1.0)
+
+    if s_in is not None:
+        Sin = _columns(s_in, F, 's_in')
+    elif Cu is not None:
+        Sin = np.real(np.einsum('kii->ki', Cu))
+    else:
+        Sin = None
+    if band is None:
+        if Sin is None:
+            raise ValueError('Give the input spectral density (s_in or '
+                             'c_in) or the excitation band')
+        band = excitation_band(freq, Sin)
+    if Sin is None:
+        Sin = np.full((F, 1), np.nan)
+
+    # the same split at half the frequency resolution, where the cross
+    # spectra are there to form it: pairs of lines averaged
+    coarse = None
+    if Suy is not None and Cu is not None:
+        n2 = F // 2
+        pair = lambda a: 0.5 * (a[0:2 * n2:2] + a[1:2 * n2:2])
+        S2 = pair(Syy)
+        c2 = np.clip(_coherent_power(pair(np.conj(Cu)), pair(Suy))
+                     / np.maximum(S2, 1e-300), 0.0, 1.0)
+        coarse = ((1 - c2) * S2).sum(axis=0) / S2.sum(axis=0)
+
+    # out of band is visible only if the spectra run past the band
+    oob_known = freq[-1] > band[1] + max(5 * df, 0.02 * band[1])
+    if names is None:
+        names = [f"ch {c + 1}" for c in range(n_out)]
+    nan = np.full(n_out, np.nan)
+    n_in = Sin.shape[1]
+    return SpectraResult(
+        label=label, fs=2.0 * (freq[-1] + df), freq=freq, s_in=Sin,
+        s_tot=Syy, coh=coh, band=(float(band[0]), float(band[1])),
+        in_rms=np.sqrt(np.trapezoid(Sin, freq, axis=0)),
+        rms=np.sqrt(np.trapezoid(Syy, freq, axis=0)),
+        skew=nan, kurt=nan.copy(),
+        in_skew=np.full(n_in, np.nan), in_kurt=np.full(n_in, np.nan),
+        skew_se=nan.copy(), kurt_se=nan.copy(), nperseg=0,
+        coarse_noncoherent=coarse, names=[str(n) for n in names],
+        from_spectra=True, oob_known=bool(oob_known), n_avg=int(n_avg))
+
+
+def _coherent_power(Suu, Suy):
+    """Suy^H Suu^-1 Suy per frequency and response channel."""
+    n_in = Suu.shape[1]
+    scale = np.trace(Suu.real, axis1=1, axis2=2).max()
+    reg = 1e-12 * scale * np.eye(n_in)
+    X = np.linalg.solve(Suu + reg, Suy)
+    return np.einsum('kic,kic->kc', np.conj(Suy), X).real
+
+
 # ---------------------------------------------------------------------------
 # plots
 # ---------------------------------------------------------------------------
@@ -306,7 +514,8 @@ def plot_record(res: SpectraResult, channels: Optional[Sequence[int]] = None,
         lim = 'at most ' if res.resolution_limited[c] else ''
         ax.set_title(f"{res.names[c]}: {lim}"
                      f"{100*res.frac_noncoherent[c]:.1f}% non-coherent, "
-                     f"{100*res.frac_out_of_band[c]:.1f}% out of band",
+                     + (f"{100*res.frac_out_of_band[c]:.1f}% out of band"
+                        if res.oob_known else "out of band not covered"),
                      fontsize=9.5)
         ax.grid(True, which='major', alpha=0.3)
         ax.legend(fontsize=7.5, loc='upper right', framealpha=0.9)
@@ -319,32 +528,52 @@ def plot_record(res: SpectraResult, channels: Optional[Sequence[int]] = None,
     ax = fig.add_subplot(gs[nrow, 0])
     ax.bar(x - 0.2, 100 * res.frac_noncoherent[ch], 0.4, color='tab:red',
            label='non-coherent share')
-    ax.bar(x + 0.2, 100 * res.frac_out_of_band[ch], 0.4, color='tab:gray',
-           label='out-of-band share')
+    ax.bar(x + 0.2, np.nan_to_num(100 * res.frac_out_of_band[ch]), 0.4,
+           color='tab:gray',
+           label='out-of-band share' if res.oob_known
+           else 'out-of-band share: not covered by the spectra')
     ax.set_xticks(x, lab)
     ax.set_ylabel('% of mean square')
     ax.set_title('share of each channel\'s energy', fontsize=10)
     ax.legend(fontsize=8)
     ax.grid(True, axis='y', alpha=0.3)
-    ax = fig.add_subplot(gs[nrow, 1])
-    ax.bar(x, res.skew[ch], 0.5, color='tab:green',
-           yerr=2 * res.skew_se[ch], capsize=3)
-    ax.axhline(0, color='k', lw=0.8)
-    ax.set_xticks(x, lab)
-    ax.set_title('skewness: 0 = symmetric amplitudes (bars ±2 s.e.)',
-                 fontsize=10)
-    ax.grid(True, axis='y', alpha=0.3)
-    ax = fig.add_subplot(gs[nrow, 2])
-    ax.bar(x, res.kurt[ch], 0.5, color='tab:purple',
-           yerr=2 * res.kurt_se[ch], capsize=3)
-    ax.axhline(0, color='k', lw=0.8)
-    ax.set_xticks(x, lab)
-    ax.set_title('excess kurtosis: 0 = Gaussian (bars ±2 s.e.)',
-                 fontsize=10)
-    ax.grid(True, axis='y', alpha=0.3)
+    if res.from_spectra:
+        ax = fig.add_subplot(gs[nrow, 1])
+        ax.bar(x, 100 * res.frac_noncoherent_in_band[ch], 0.5,
+               color='tab:red')
+        ax.set_xticks(x, lab)
+        ax.set_ylabel('% of in-band mean square')
+        ax.set_title('non-coherent share inside the excitation band',
+                     fontsize=10)
+        ax.grid(True, axis='y', alpha=0.3)
+        ax = fig.add_subplot(gs[nrow, 2])
+        ax.axis('off')
+        import textwrap
+        ax.text(0.0, 0.95, 'From spectra only:\n\n'
+                + '\n\n'.join(textwrap.fill('- ' + n, 52,
+                                              subsequent_indent='  ')
+                              for n in res.notes()),
+                va='top', ha='left', fontsize=9, transform=ax.transAxes)
+    else:
+        ax = fig.add_subplot(gs[nrow, 1])
+        ax.bar(x, res.skew[ch], 0.5, color='tab:green',
+               yerr=2 * res.skew_se[ch], capsize=3)
+        ax.axhline(0, color='k', lw=0.8)
+        ax.set_xticks(x, lab)
+        ax.set_title('skewness: 0 = symmetric amplitudes (bars ±2 s.e.)',
+                     fontsize=10)
+        ax.grid(True, axis='y', alpha=0.3)
+        ax = fig.add_subplot(gs[nrow, 2])
+        ax.bar(x, res.kurt[ch], 0.5, color='tab:purple',
+               yerr=2 * res.kurt_se[ch], capsize=3)
+        ax.axhline(0, color='k', lw=0.8)
+        ax.set_xticks(x, lab)
+        ax.set_title('excess kurtosis: 0 = Gaussian (bars ±2 s.e.)',
+                     fontsize=10)
+        ax.grid(True, axis='y', alpha=0.3)
 
     if len(ch) > 8:                      # many channels: slant the labels
-        for a in fig.axes[-3:]:
+        for a in fig.axes[-3:-1] if res.from_spectra else fig.axes[-3:]:
             for t in a.get_xticklabels():    # end of each label at its bar
                 t.set(rotation=45, ha='right', rotation_mode='anchor')
     fig.suptitle(f"{res.label}   excitation band {res.band[0]:.0f}-"

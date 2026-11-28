@@ -18,8 +18,9 @@ time, level) and reports:
   * one state or two;
   * against time, one graph per mode: frequency and damping
     (sweep_time_<record>.png) and the mode's rebuilt acceleration
-    (sweep_modal_<record>.png); level, order and every pole are on
-    sweep_time_detail_<record>.png.
+    (sweep_modal_<record>.png), and the level of every mode on one graph
+    with the spectrogram (sweep_levels_<record>.png); level, order and
+    every pole are on sweep_time_detail_<record>.png.
 
 A mode is tracked when its pole is in PERSISTENCE (20%) of the windows.
 
@@ -43,6 +44,7 @@ MODES = ('shape', 'time', 'level')
 COLORS = {'shape': 'tab:orange', 'time': 'tab:blue', 'level': 'tab:green'}
 LAGS, TOL, NEIGHBORS, STRIDE = 16, 5e-4, 960, 250
 F_MAX = 1000.0
+BAND_TOP = 416.0             # top of the excitation band, Hz
 PERSISTENCE = 0.2            # a mode is tracked if its pole is in this
                              # share of the windows (tracker default 0.5)
 BASELINE = {'cubic ss, 5x level': 'linear, 5x level'}   # default: 'linear'
@@ -134,6 +136,8 @@ def table(label, res, base):
                   f"{share[0]:11.0f}% {share[-1]:10.0f}%"
                   f"{note}")
         print(f"    -> {cl.verdict}")
+        if getattr(cl, 'content', None):
+            print(f"    -> {cl.content['verdict']}")
     return rows
 
 
@@ -432,6 +436,39 @@ def plot_modal(label, res, save_path, mode='time'):
     return share
 
 
+def plot_levels(label, res, save_path, mode='time', channel=None):
+    """Per record: measured response, spectrogram and the level of each
+    tracked mode against time, at one mass (see
+    CVAPhiCluster.plot_modal_levels). channel None picks the mass where the
+    weaker modes are the largest share of the response."""
+    import matplotlib.pyplot as plt
+    cl = res[mode]['cl']
+    if len(cl.ref_freq) == 0:
+        return
+    fig = cl.plot_modal_levels(channel=channel, band_top=BAND_TOP,
+                               names=[f'mass {c + 1}' for c in range(6)],
+                               dpi=120)
+    fig.suptitle(f"{label}: {fig._suptitle.get_text()[0].lower()}"
+                 f"{fig._suptitle.get_text()[1:]} (neighbours by {mode})",
+                 fontsize=12)
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+
+
+def plot_conditions(label, res, save_path, mode='time'):
+    """Per record: one condition or two from what the local models
+    contain (CVAPhiCluster.plot_conditions)."""
+    import matplotlib.pyplot as plt
+    cl = res[mode]['cl']
+    if len(cl.ref_freq) == 0:
+        return
+    fig = cl.plot_conditions(dpi=120)
+    fig.suptitle(f"{label} (neighbours by {mode}). "
+                 + fig._suptitle.get_text(), fontsize=12, wrap=True)
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+
+
 def plot_orders(orders, save_path):
     """Model order supported by each record, for each neighbour choice."""
     import matplotlib.pyplot as plt
@@ -485,6 +522,10 @@ def main(only=None):
         plot_time_detail(label, res[label], base,
                          OUT / f"sweep_time_detail_{slug(label)}.png")
         plot_modal(label, res[label], OUT / f"sweep_modal_{slug(label)}.png")
+        plot_levels(label, res[label],
+                    OUT / f"sweep_levels_{slug(label)}.png")
+        plot_conditions(label, res[label],
+                        OUT / f"sweep_conditions_{slug(label)}.png")
     plot_orders(orders, OUT / 'sweep_orders.png')
     (OUT / 'tables.txt').write_text(text.getvalue())
     print(text.getvalue())

@@ -165,3 +165,44 @@ def test_modal_history_rebuilds_the_response(linear_run):
         spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
         fpk = np.fft.rfftfreq(len(x), 1 / fs)[int(np.argmax(spec))]
         assert abs(fpk - f0) < 0.02 * f0
+
+
+def test_content_decision_on_made_up_series():
+    from cva_phi_cluster import content_decision
+    rng = np.random.default_rng(0)
+    n = 400
+    level = np.sin(np.arange(n) / 12.0) + 0.1 * rng.standard_normal(n)
+    quiet = level < 0
+    # steady: order fixed, both modes always there
+    one = content_decision(np.full(n, 6), np.ones((n, 2), bool), level)
+    assert one['n_conditions'] == 1 and one['verdict'] == 'one condition'
+    # two-valued order, and a mode present only when quiet
+    order = np.where(quiet, 20, 6) + rng.integers(-1, 2, n)
+    P = np.column_stack([np.ones(n, bool), quiet])
+    two = content_decision(order, P, level)
+    assert two['n_conditions'] == 2 and two['order_two_valued']
+    assert two['sustained'] == [1]
+    assert (two['labels'] == (~quiet).astype(int)).mean() > 0.95
+    names = [c['name'] for c in two['conditions']]
+    assert names == ['quieter', 'louder']
+    assert two['conditions'][0]['order'] > two['conditions'][1]['order']
+    # order spread evenly over a range: graded, not two conditions
+    graded = content_decision(rng.integers(6, 21, n),
+                              np.ones((n, 2), bool), level)
+    assert graded['n_conditions'] == 1 and 'varies' in graded['verdict']
+    # a mode flickering at random is not a condition
+    flick = content_decision(np.full(n, 6),
+                             np.column_stack([np.ones(n, bool),
+                                              rng.random(n) < 0.5]), level)
+    assert flick['n_conditions'] == 1 and flick['sustained'] == []
+    # a mode that comes and goes with no change of order: a note only
+    note = content_decision(np.full(n, 6), P, level)
+    assert note['n_conditions'] == 1 and 'stretches' in note['verdict']
+
+
+def test_linear_record_is_one_condition(linear_run):
+    cl = _cluster(linear_run)
+    assert cl.content['n_conditions'] == 1
+    assert cl.content['presence'].all()
+    assert cl.plot_conditions() is not None
+    assert cl.plot_modal_levels() is not None

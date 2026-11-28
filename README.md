@@ -231,6 +231,48 @@ is 50%), so bands that appear only at some levels get a track. A mode that moves
 frequency drops out of its track, so a strongly hardening mode shows as
 "found" less often at high level.
 
+### Conditions: what the local models contain
+
+The regime test asks whether one mode's frequency takes two values. A
+system can also change in a different way: the same modes keep their
+frequencies, but the model needs more states, and more modes, in some
+stretches of the record than in others. A dead zone does this: at low
+amplitude the system sits inside the gap and behaves as a different linear
+system.
+
+`CVAPhiCluster.fit()` therefore also runs `content_conditions()`, which
+classifies each window by two things a linear system keeps fixed under
+random excitation: the number of states the window supports and the set of
+tracked modes present in it. (How the response is shared between the modes
+is not used; that moves with the excitation even in a linear system.)
+
+- **Two conditions** are reported when the order is two-valued: two groups
+  of windows, each at least 15% of the record, centres apart by at least 2
+  states and 25%, with few windows in between. The conditions are named
+  quieter and louder when they follow the response level.
+- Modes that **come and go in stretches** (runs at least 2.5 times as long
+  as chance would give) are listed and help label the windows. On their
+  own, with no change of order, they are a note and not a second condition.
+- An order that varies over a range without two groups is reported as one
+  condition with that range.
+
+Use neighbours by `time` for this; the other neighbour choices mix
+stretches of the record. The verdict is in `clust.content['verdict']`.
+
+Three pages show the behaviour against time, in the GUI (tabs "Modal
+levels" and "Conditions") and from `run_r6dof_sweep.py`:
+
+- `plot_conditions()`: response level, model order and a mark for each
+  mode present in each window, coloured by condition
+  (`sweep_conditions_<record>.png`).
+- `plot_modal_levels(channel)`: for one response, the measured signal, its
+  spectrogram, and the level of every tracked mode on one graph
+  (`sweep_levels_<record>.png`). Levels come from `modal_history()`.
+
+On the r6dof records the linear ones read one condition and the dead zone
+reads two: quieter, 56% of the time, order 19, with the 678, 746 and 915 Hz
+modes present; louder, 44%, order 8.
+
 ### How the regimes are found
 
 Each window's Φ is in that window's own state basis, so the entries of two Φ
@@ -407,10 +449,40 @@ ranges and the first third of the record against the last third.
 ### Running the nonlinearity analyses on your own data
 
 The analyses need **time histories**: the control accelerometer(s) as
-inputs and the response channels, sampled together at one rate. Spectra
-alone (PSD, coherence, FRF) are not enough; only the coherent / non-coherent
-/ out-of-band split could be formed from them, and the code does not read
-spectra.
+inputs and the response channels, sampled together at one rate.
+
+**Spectra only.** If the time histories were not kept, the coherent /
+non-coherent / out-of-band split, and nothing else, can be formed from
+stored spectra:
+
+```python
+from cva_spectra import analyze_spectra, plot_record
+res = analyze_spectra(freq, c_resp=Cyy, H=H, c_in=Cuu, names=names,
+                      n_avg=72)
+res.table()
+plot_record(res, save_path='1_spectra.png')
+```
+
+It needs the response spectral density (`s_resp`, or the diagonal of the
+cross-spectral matrix `c_resp`) and the coherence with the inputs: either
+the (multiple) coherence itself, or the frequency responses `H` with the
+input cross-spectral matrix `c_in` (`c_in[i, j] = E[u_i conj(u_j)]`, so
+that the coherent part is `H c_in H^H`), or the input-to-response
+cross-spectra with `c_in`. Frequency responses with input spectra alone are
+not enough; they give only the coherent part.
+
+- Out-of-band energy is reported only if the spectra run past the top of
+  the excitation band. Spectra saved for control usually stop there.
+- The non-coherent share depends on the frequency resolution of the stored
+  spectra and is an upper bound near sharp resonances.
+- With few averages per input the coherence reads high and the
+  non-coherent share low; give `n_avg` and the table says so.
+- Skewness, kurtosis, the residual history, level dependence, coupling and
+  regimes all need time histories.
+
+`python run_blockhead.py --spectra` does this for the blockhead test from
+`Case01_XYZRXRYRZ_Group_Spectra.mat` and agrees with the time histories
+analysed at the same 3.125 Hz resolution.
 
 **Text files, in the GUI.** Columns of numbers, with or without a time
 column and header lines, or a paired `<name>in.dat` / `<name>out.dat` (see
