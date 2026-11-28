@@ -57,7 +57,8 @@ from matplotlib.widgets import SpanSelector
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
@@ -338,17 +339,41 @@ class NonlinearWorker(QObject):
 # =============================================================================
 
 class FigureTab(QWidget):
+    """One figure with its toolbar. A figure taller than it is wide (a page
+    with many rows of panels) keeps its proportions and scrolls; any other
+    figure fills the tab."""
+
     def __init__(self, fig: Figure, parent=None):
         super().__init__(parent)
         self.fig = fig
-        canvas = FigureCanvasQTAgg(fig)
+        w, h = fig.get_size_inches()
+        self._aspect = float(h) / float(w)
+        self.canvas = canvas = FigureCanvasQTAgg(fig)
         canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         toolbar = NavigationToolbar2QT(canvas, self)
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setWidget(canvas)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(toolbar)
-        lay.addWidget(canvas)
+        lay.addWidget(self.scroll)
         canvas.draw_idle()
+
+    def _fit(self):
+        if self._aspect > 1.0:
+            bar = self.scroll.verticalScrollBar().sizeHint().width()
+            width = max(self.width() - bar, 200)
+            self.canvas.setMinimumHeight(int(width * self._aspect))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit()
 
 
 # =============================================================================
