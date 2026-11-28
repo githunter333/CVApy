@@ -559,15 +559,7 @@ class CVAPhiCluster:
         modal = np.full((N, nm, n_out), np.nan)
         fitted = np.full((N, n_out), np.nan)
         direct = np.zeros((N, n_out))
-        U = None
-        if getattr(run, 'inputd', None) is not None:
-            # input history ending at each sample: u(n), u(n-1), ...
-            u = np.asarray(run.inputd, float).reshape(len(run.datout), -1)
-            m = max(1, min(lags, run.cfg.neighbors // (4 * u.shape[1])))
-            U = np.zeros((len(u), m * u.shape[1]))
-            for k in range(m):
-                U[k:, k * u.shape[1]:(k + 1) * u.shape[1]] = u[:len(u) - k]
-            U = U / (U.std(axis=0) + 1e-300)
+        U = self._input_history()
         for a, ii in enumerate(order):
             wr = run.windows[self.use_idx[ii]]
             lo, hi = int(edges[a]), int(edges[a + 1])
@@ -781,6 +773,64 @@ class CVAPhiCluster:
                                    dpi=dpi)
             self.plot_conditions(save_path=sp('clusters_conditions'),
                                  dpi=dpi)
+
+    def window_shapes(self):
+        """Mode shape of each tracked mode in each window: the response
+        pattern C v of the mode's eigenvector, from the same output fit as
+        modal_history. Returns complex (n_windows, n_modes, n_out), scaled
+        to unit length with the largest component real and positive; NaN
+        where the mode is not found."""
+        run = self.run
+        lags, n_out = run.cfg.lags, run.n_out
+        nm = len(self.ref_freq)
+        out = np.full((len(self.use_idx), nm, n_out), np.nan + 0j)
+        U = self._input_history()
+        for ii, wi in enumerate(self.use_idx):
+            wr = run.windows[wi]
+            C = self._output_map(wr, U)
+            if C is None:
+                continue
+            ev, V = np.linalg.eig(wr.Phi)
+            for j in range(nm):
+                pole = self.track_pole[ii, j]
+                if not np.isfinite(pole):
+                    continue
+                g = int(np.argmin(np.abs(ev - pole)))
+                phi = C @ V[:, g]
+                k = int(np.argmax(np.abs(phi)))
+                if abs(phi[k]) < 1e-300:
+                    continue
+                phi = phi * np.conj(phi[k]) / abs(phi[k])
+                out[ii, j] = phi / np.linalg.norm(phi)
+        return out
+
+    def _input_history(self):
+        """Input history ending at each sample, scaled: u(n), u(n-1), ..."""
+        run = self.run
+        if getattr(run, 'inputd', None) is None:
+            return None
+        lags = run.cfg.lags
+        u = np.asarray(run.inputd, float).reshape(len(run.datout), -1)
+        m = max(1, min(lags, run.cfg.neighbors // (4 * u.shape[1])))
+        U = np.zeros((len(u), m * u.shape[1]))
+        for k in range(m):
+            U[k:, k * u.shape[1]:(k + 1) * u.shape[1]] = u[:len(u) - k]
+        return U / (U.std(axis=0) + 1e-300)
+
+    def _output_map(self, wr, U):
+        """C in y = C x (+ D u) over one window's neighbours, or None."""
+        run = self.run
+        if wr.rank == 0:
+            return None
+        newest = np.asarray(wr.indpast) + run.cfg.lags - 1
+        ok = (newest >= 0) & (newest < run.datout.shape[0])
+        if ok.sum() <= wr.rank:
+            return None
+        A = wr.spast[ok]
+        if U is not None:
+            A = np.hstack([A, U[newest[ok]]])
+        CD = np.linalg.lstsq(A, run.datout[newest[ok]], rcond=None)[0].T
+        return CD[:, :wr.rank]
 
     def modal_levels(self, win_sec: float = 0.1, history: dict = None):
         """Level of each tracked mode against time: rms of the mode's

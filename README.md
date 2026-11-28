@@ -273,6 +273,32 @@ On the r6dof records the linear ones read one condition and the dead zone
 reads two: quieter, 56% of the time, order 19, with the 678, 746 and 915 Hz
 modes present; louder, 44%, order 8.
 
+### One model in place of the local ones
+
+`cva_global.GlobalModel` stores, for each tracked mode, how its frequency,
+damping, shape and presence depend on the local response level, and how the
+model order does (straight lines in log level; presence as a probability).
+Given the level in a window it returns that window's modes without fitting
+anything there.
+
+```python
+from cva_global import GlobalModel, cluster_arrays
+d = cluster_arrays(clust)                  # per-window quantities
+gm = GlobalModel.from_cluster(clust, train=d['time'] < 40)
+pred = gm.predict(d['log_level'])          # freq, zeta, presence, shapes, order
+rows = gm.score(clust, test=d['time'] >= 40)
+```
+
+`degree=0` gives a single linear model, the baseline. `run_r6dof_global.py`
+fits on the first 40 s of each r6dof record and predicts the last 20 s. On
+the cubic record the level model predicts the hardening modes' frequencies
+and the order better than the single model (175.9 Hz mode: 0.68 against
+1.66 Hz); on the dead zone record it predicts the order and which modes are
+present (order: 3.6 against 7.2 states); on the linear records the two are
+identical. Most of the remaining error is the window-to-window scatter of
+the direct fits. Predictions outside the levels the fit saw are held at the
+end values.
+
 ### How the regimes are found
 
 Each window's Φ is in that window's own state basis, so the entries of two Φ
